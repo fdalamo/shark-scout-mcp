@@ -70,16 +70,127 @@ function compactEnhanced(tx: any) {
   };
 }
 
+function walletTrade(tx: any, address: string) {
+  const nativeTransfers = tx?.nativeTransfers ?? [];
+  const tokenTransfers = tx?.tokenTransfers ?? [];
+
+  const solOutLamports = nativeTransfers
+    .filter((t: any) => t?.fromUserAccount === address)
+    .reduce((sum: number, t: any) => sum + Number(t?.amount ?? 0), 0);
+  const solInLamports = nativeTransfers
+    .filter((t: any) => t?.toUserAccount === address)
+    .reduce((sum: number, t: any) => sum + Number(t?.amount ?? 0), 0);
+
+  const tokenNet = new Map<string, number>();
+  for (const t of tokenTransfers) {
+    const mint = t?.mint;
+    if (!mint) continue;
+    const amount = Number(t?.tokenAmount ?? 0);
+    if (!Number.isFinite(amount) || amount === 0) continue;
+    if (t?.toUserAccount === address) tokenNet.set(mint, (tokenNet.get(mint) ?? 0) + amount);
+    if (t?.fromUserAccount === address) tokenNet.set(mint, (tokenNet.get(mint) ?? 0) - amount);
+  }
+
+  const tokenLegs = [...tokenNet.entries()]
+    .filter(([, amount]) => Math.abs(amount) > 0)
+    .map(([mint, amount]) => ({ mint, amount }));
+
+  const netSolLamports = solInLamports - solOutLamports;
+  const netSol = netSolLamports / LAMPORTS_PER_SOL;
+  const received = tokenLegs.filter((x) => x.amount > 0).sort((a, b) => b.amount - a.amount);
+  const sent = tokenLegs.filter((x) => x.amount < 0).sort((a, b) => a.amount - b.amount);
+
+  let direction: "BUY" | "SELL" | "SWAP" | "UNKNOWN" = "UNKNOWN";
+  let primaryMint: string | null = null;
+  let tokenAmount: number | null = null;
+
+  if (netSol < 0 && received.length > 0) {
+    direction = "BUY";
+    primaryMint = received[0]?.mint ?? null;
+    tokenAmount = received[0]?.amount ?? null;
+  } else if (netSol > 0 && sent.length > 0) {
+    direction = "SELL";
+    primaryMint = sent[0]?.mint ?? null;
+    tokenAmount = sent[0] ? Math.abs(sent[0].amount) : null;
+  } else if (received.length > 0 || sent.length > 0) {
+    direction = "SWAP";
+    primaryMint = received[0]?.mint ?? sent[0]?.mint ?? null;
+    tokenAmount = received[0]?.amount ?? (sent[0] ? Math.abs(sent[0].amount) : null);
+  }
+
+  const walletParticipates = Math.abs(netSolLamports) > 0 || tokenLegs.length > 0;
+  return {
+    signature: tx?.signature ?? null,
+    timestamp: tx?.timestamp ?? null,
+    heliusType: tx?.type ?? null,
+    source: tx?.source ?? null,
+    feePayer: tx?.feePayer ?? null,
+    walletIsFeePayer: tx?.feePayer === address,
+    walletParticipates,
+    direction,
+    mint: primaryMint,
+    tokenAmount,
+    solSpent: netSol < 0 ? Math.abs(netSol) : 0,
+    solReceived: netSol > 0 ? netSol : 0,
+    netSol,
+    feeLamports: tx?.fee ?? null,
+    tokenLegs,
+    evidence: {
+      walletNativeTransfers: nativeTransfers.filter((t: any) => t?.fromUserAccount === address || t?.toUserAccount === address),
+      walletTokenTransfers: tokenTransfers.filter((t: any) => t?.fromUserAccount === address || t?.toUserAccount === address),
+    },
+  };
+}
+
 const app = express();
 app.disable("x-powered-by");
 app.use(express.json({ limit: "256kb" }));
 
 app.get("/", (_req, res) => {
-  res.json({ ok: true, service: "shark-scout", mode: "browser-api", version: "0.3.0", readOnly: true, endpoints: ["/health", "/wallet/:address/report?limit=20", "/wallet/:address/balance", "/wallet/:address/activity?limit=25", "/wallet/:address/swaps?limit=25", "/wallet/:address/positions"] });
+  res.json({ ok: true, service: "shark-scout", mode: "browser-api", version: "0.4.0", readOnly: true, endpoints: ["/health", "/wallet/:address/analyst?limit=50", "/wallet/:address/report?limit=20", "/wallet/:address/balance", "/wallet/:address/activity?limit=25", "/wallet/:address/swaps?limit=25", "/wallet/:address/positions"] });
 });
 
 app.get("/health", (_req, res) => {
-  res.json({ ok: true, service: "shark-scout", version: "0.3.0", mode: "browser-api", readOnly: true, heliusConfigured: Boolean(HELIUS_API_KEY), rpc: HELIUS_API_KEY ? "helius" : "solana", time: new Date().toISOString() });
+  res.json({ ok: true, service: "shark-scout", version: "0.4.0", mode: "browser-api", readOnly: true, heliusConfigured: Boolean(HELIUS_API_KEY), rpc: HELIUS_API_KEY ? "helius" : "solana", time: new Date().toISOString() });
+});
+
+app.get("/wallet/:address/analyst", async (req: Request, res: Response) => {
+  try {
+    const address = validAddress(routeParam(req.params.address, "address"));
+    const limit = boundedLimit(req.query.limit, 50, 100);
+    const [balance, enhanced] = await Promise.all([
+      rpc("getBalance", [address, { commitment: "confirmed" }]),
+      heliusAddressTransactions(address, limit),
+    ]);
+    if (!enhanced) throw new Error("Analyst endpoint requires Helius enhanced transactions");
+
+    const all = (enhanced as any[]).map((tx: any) => walletTrade(tx, address));
+    const trades = all.filter((x: any) => x.walletParticipates && (x.heliusType === "SWAP" || x.direction !== "UNKNOWN"));
+    const ignored = all.length - trades.length;
+    const buys = trades.filter((x: any) => x.direction === "BUY");
+    const sells = trades.filter((x: any) => x.direction === "SELL");
+
+    res.json({
+      ok: true,
+      version: "0.4.0",
+      address,
+      scannedAt: new Date().toISOString(),
+      balanceSol: typeof balance?.value === "number" ? balance.value / LAMPORTS_PER_SOL : null,
+      source: "helius_enhanced",
+      scannedTransactions: all.length,
+      walletRelevantTrades: trades.length,
+      ignoredTransactions: ignored,
+      buys: buys.length,
+      sells: sells.length,
+      trades,
+      analystNotes: [
+        "Trades are wallet-centric: a Helius SWAP is not counted merely because it touched the address.",
+        "Direction is inferred from this wallet's own native/token transfer legs; UNKNOWN is preserved rather than guessed.",
+        "Market cap, liquidity, token age, realized PnL, holding time, and copy attribution are not yet claimed by this endpoint.",
+        "Use signature + timestamp + mint + direction as the minimum evidence key for source-to-copy matching.",
+      ],
+    });
+  } catch (e) { fail(res, e); }
 });
 
 app.get("/wallet/:address/report", async (req: Request, res: Response) => {
@@ -96,7 +207,7 @@ app.get("/wallet/:address/report", async (req: Request, res: Response) => {
       const swaps = rows.filter((tx: any) => tx.type === "SWAP");
       res.json({
         ok: true,
-        version: "0.3.0",
+        version: "0.4.0",
         address,
         scannedAt: new Date().toISOString(),
         balance: {
@@ -121,7 +232,7 @@ app.get("/wallet/:address/report", async (req: Request, res: Response) => {
     const txs = await rpc("getSignaturesForAddress", [address, { limit }]);
     res.json({
       ok: true,
-      version: "0.3.0",
+      version: "0.4.0",
       address,
       scannedAt: new Date().toISOString(),
       balance: {
