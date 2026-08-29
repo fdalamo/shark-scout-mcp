@@ -12,6 +12,12 @@ function validAddress(value: string): string {
   try { return new PublicKey(value).toBase58(); } catch { throw new Error(`Invalid Solana address: ${value}`); }
 }
 
+function routeParam(value: string | string[] | undefined, name: string): string {
+  const resolved = Array.isArray(value) ? value[0] : value;
+  if (!resolved) throw new Error(`Missing route parameter: ${name}`);
+  return resolved;
+}
+
 async function fetchJson(url: string, init: RequestInit = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
@@ -50,16 +56,16 @@ app.disable("x-powered-by");
 app.use(express.json({ limit: "256kb" }));
 
 app.get("/", (_req, res) => {
-  res.json({ ok: true, service: "shark-scout", mode: "browser-api", version: "0.2.0", readOnly: true, endpoints: ["/health", "/wallet/:address/balance", "/wallet/:address/activity?limit=25", "/wallet/:address/swaps?limit=25", "/wallet/:address/positions"] });
+  res.json({ ok: true, service: "shark-scout", mode: "browser-api", version: "0.2.1", readOnly: true, endpoints: ["/health", "/wallet/:address/balance", "/wallet/:address/activity?limit=25", "/wallet/:address/swaps?limit=25", "/wallet/:address/positions"] });
 });
 
 app.get("/health", (_req, res) => {
-  res.json({ ok: true, service: "shark-scout", version: "0.2.0", mode: "browser-api", readOnly: true, heliusConfigured: Boolean(HELIUS_API_KEY), rpc: HELIUS_API_KEY ? "helius" : "solana", time: new Date().toISOString() });
+  res.json({ ok: true, service: "shark-scout", version: "0.2.1", mode: "browser-api", readOnly: true, heliusConfigured: Boolean(HELIUS_API_KEY), rpc: HELIUS_API_KEY ? "helius" : "solana", time: new Date().toISOString() });
 });
 
 app.get("/wallet/:address/balance", async (req: Request, res: Response) => {
   try {
-    const address = validAddress(req.params.address);
+    const address = validAddress(routeParam(req.params.address, "address"));
     const result = await rpc("getBalance", [address, { commitment: "confirmed" }]);
     res.json({ ok: true, address, lamports: result?.value ?? null, sol: typeof result?.value === "number" ? result.value / LAMPORTS_PER_SOL : null, slot: result?.context?.slot ?? null, source: HELIUS_API_KEY ? "helius_rpc" : "solana_rpc" });
   } catch (e) { fail(res, e); }
@@ -67,7 +73,7 @@ app.get("/wallet/:address/balance", async (req: Request, res: Response) => {
 
 app.get("/wallet/:address/activity", async (req: Request, res: Response) => {
   try {
-    const address = validAddress(req.params.address);
+    const address = validAddress(routeParam(req.params.address, "address"));
     const limit = Math.min(Math.max(Number(req.query.limit ?? 25), 1), 100);
     const enhanced = await heliusAddressTransactions(address, limit);
     if (enhanced) {
@@ -81,7 +87,7 @@ app.get("/wallet/:address/activity", async (req: Request, res: Response) => {
 
 app.get("/wallet/:address/swaps", async (req: Request, res: Response) => {
   try {
-    const address = validAddress(req.params.address);
+    const address = validAddress(routeParam(req.params.address, "address"));
     const limit = Math.min(Math.max(Number(req.query.limit ?? 25), 1), 100);
     const enhanced = await heliusAddressTransactions(address, limit);
     if (!enhanced) throw new Error("Swap classification requires Helius in browser mode");
@@ -92,7 +98,7 @@ app.get("/wallet/:address/swaps", async (req: Request, res: Response) => {
 
 app.get("/wallet/:address/positions", async (req: Request, res: Response) => {
   try {
-    const address = validAddress(req.params.address);
+    const address = validAddress(routeParam(req.params.address, "address"));
     const result = await rpc("getTokenAccountsByOwner", [address, { programId: TOKEN_PROGRAM_ID }, { encoding: "jsonParsed" }]);
     const positions = (result?.value ?? []).map((row: any) => {
       const info = row?.account?.data?.parsed?.info;
