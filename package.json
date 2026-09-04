@@ -1,12 +1,13 @@
 {
   "name": "shark-scout-mcp",
-  "version": "0.2.0",
+  "version": "0.6.0",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/browser.ts",
     "build": "tsc -p tsconfig.json",
-    "start": "node dist/browser.js"
+    "start": "node dist/browser.js",
+    "harvest": "node dist/harvest.js"
   },
   "engines": {
     "node": ">=20"
