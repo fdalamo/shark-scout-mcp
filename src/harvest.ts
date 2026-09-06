@@ -4,8 +4,13 @@ import { PublicKey } from "@solana/web3.js";
 
 const HELIUS_API_KEY = process.env.HELIUS_API_KEY?.trim();
 const BIRDEYE_API_KEY = process.env.BIRDEYE_API_KEY?.trim();
-const ST_API_KEY = (process.env.SOLANA_TRACKER_API_KEY || process.env.ST_API_KEY)?.trim();
-const RPC_URL = process.env.SOLANA_RPC_URL?.trim() || (HELIUS_API_KEY ? `https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}` : "https://api.mainnet-beta.solana.com");
+const VYBE_API_KEY = process.env.VYBE_API_KEY?.trim();
+const RPC_URL =
+  process.env.SOLANA_RPC_URL?.trim() ||
+  (HELIUS_API_KEY
+    ? `https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`
+    : "https://api.mainnet-beta.solana.com");
+
 const STATE_PATH = process.env.SCOUT_STATE_PATH || "./data/shark-state.json";
 const REPORT_PATH = process.env.SCOUT_REPORT_PATH || "./data/latest-harvest.json";
 const TOKEN_LIMIT = clamp(Number(process.env.HARVEST_TOKEN_LIMIT || 40), 5, 150);
@@ -13,13 +18,15 @@ const TRADERS_PER_TOKEN = clamp(Number(process.env.HARVEST_TRADERS_PER_TOKEN || 
 const GLOBAL_WALLET_LIMIT = clamp(Number(process.env.HARVEST_GLOBAL_WALLET_LIMIT || 50), 10, 250);
 const PROFILE_LIMIT = clamp(Number(process.env.HARVEST_PROFILE_LIMIT || 40), 0, 200);
 const TIMEOUT_MS = clamp(Number(process.env.REQUEST_TIMEOUT_MS || 15000), 3000, 60000);
+const BIRDEYE_MIN_INTERVAL_MS = clamp(Number(process.env.BIRDEYE_MIN_INTERVAL_MS || 1100), 1000, 10000);
+const VYBE_CONCURRENCY = clamp(Number(process.env.VYBE_CONCURRENCY || 3), 1, 8);
 const SYSTEM_PROGRAM = "11111111111111111111111111111111";
 const TOKEN_PROGRAMS = new Set([
   "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
   "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
 ]);
 
-type Lane = "TOKEN_WINNER" | "GLOBAL_LEADERBOARD" | "CROSS_TOKEN" | "CONTROL_COHORT" | "RELATED_GRAPH";
+type Lane = "TOKEN_WINNER" | "CROSS_TOKEN" | "RELATED_GRAPH";
 type WalletStatus = "RAW" | "CHEAP_PASS" | "PROFILED" | "REJECTED" | "UNKNOWN";
 
 type WalletRecord = {
@@ -34,35 +41,61 @@ type WalletRecord = {
   status: WalletStatus;
   rejectionReason?: string;
   lastProfiledAt?: string;
-  snapshot?: Record<string, unknown>;
+  discovery?: Record<string, unknown>;
+  profile?: Record<string, unknown>;
+};
+
+type TokenRecord = {
+  firstSeen: string;
+  lastSeen: string;
+  providers: string[];
+  hits: number;
 };
 
 type ScoutState = {
-  schemaVersion: 1;
+  schemaVersion: 2;
   createdAt: string;
   updatedAt: string;
   wallets: Record<string, WalletRecord>;
-  tokens: Record<string, { firstSeen: string; lastSeen: string; providers: string[]; hits: number }>;
+  tokens: Record<string, TokenRecord>;
   runs: Array<Record<string, unknown>>;
 };
 
-function clamp(n: number, min: number, max: number) { return Math.max(min, Math.min(max, Number.isFinite(n) ? Math.floor(n) : min)); }
-function now() { return new Date().toISOString(); }
+function clamp(n: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, Number.isFinite(n) ? Math.floor(n) : min));
+}
+function now(): string { return new Date().toISOString(); }
 function uniq<T>(rows: T[]): T[] { return [...new Set(rows)]; }
+function sleep(ms: number): Promise<void> { return new Promise((resolve) => setTimeout(resolve, ms)); }
 
-async function fetchJson(url: string, init: RequestInit = {}) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
-  try {
-    const res = await fetch(url, { ...init, signal: controller.signal });
-    const text = await res.text();
-    if (!res.ok) throw new Error(`${res.status} ${url}: ${text.slice(0, 400)}`);
-    return text ? JSON.parse(text) : null;
-  } finally { clearTimeout(timer); }
+async function fetchJson(url: string, init: RequestInit = {}, retries = 2): Promise<any> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+    try {
+      const response = await fetch(url, { ...init, signal: controller.signal });
+      const text = await response.text();
+      if (response.ok) return text ? JSON.parse(text) : null;
+      if ((response.status === 429 || response.status >= 500) && attempt < retries) {
+        const retryAfter = Number(response.headers.get("retry-after"));
+        await sleep(Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 750 * 2 ** attempt);
+        continue;
+      }
+      throw new Error(`HTTP ${response.status}: ${text.slice(0, 400)}`);
+    } catch (error) {
+      lastError = error;
+      if (attempt >= retries) throw error;
+      await sleep(500 * 2 ** attempt);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  throw lastError;
 }
 
 let rpcId = 1;
-async function rpc(method: string, params: unknown[] = []) {
+async function rpc(method: string, params: unknown[] = []): Promise<any> {
   const body = await fetchJson(RPC_URL, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -77,267 +110,454 @@ function validPubkey(value: unknown): string | null {
   try { return new PublicKey(value).toBase58(); } catch { return null; }
 }
 
-function arraysDeep(value: unknown, depth = 0): any[][] {
-  if (depth > 6 || value == null) return [];
-  if (Array.isArray(value)) return [value, ...value.flatMap((v) => arraysDeep(v, depth + 1))];
-  if (typeof value === "object") return Object.values(value as Record<string, unknown>).flatMap((v) => arraysDeep(v, depth + 1));
+function objectsDeep(value: unknown, depth = 0): any[] {
+  if (value == null || depth > 6) return [];
+  if (Array.isArray(value)) return value.flatMap((v) => [v, ...objectsDeep(v, depth + 1)]).filter((v) => v && typeof v === "object" && !Array.isArray(v));
+  if (typeof value === "object") return Object.values(value as Record<string, unknown>).flatMap((v) => objectsDeep(v, depth + 1));
   return [];
-}
-
-function objectsDeep(value: unknown): any[] {
-  return arraysDeep(value).flat().filter((x) => x && typeof x === "object" && !Array.isArray(x));
 }
 
 function tokenAddresses(payload: unknown): string[] {
   const out: string[] = [];
   for (const row of objectsDeep(payload)) {
-    for (const key of ["address", "mint", "tokenAddress", "token_address", "contractAddress"]) {
-      const v = validPubkey(row?.[key]);
-      if (v) out.push(v);
+    for (const key of ["address", "mint", "mintAddress", "tokenAddress", "token_address"]) {
+      const value = validPubkey(row?.[key]);
+      if (value) out.push(value);
     }
   }
   return uniq(out);
 }
 
 function walletAddress(row: any): string | null {
-  for (const key of ["wallet", "owner", "address", "walletAddress", "wallet_address", "trader", "user"]) {
-    const v = validPubkey(row?.[key]);
-    if (v) return v;
+  for (const key of ["traderAddress", "wallet", "ownerAddress", "owner", "walletAddress", "wallet_address", "trader", "user", "address"]) {
+    const value = validPubkey(row?.[key]);
+    if (value) return value;
   }
   return null;
 }
 
 function tagsFrom(row: any): string[] {
-  const raw = [row?.tag, row?.tags, row?.walletTags, row?.wallet_tags, row?.identity?.tags, row?.identity?.platform, row?.identity?.name].flat(Infinity).filter(Boolean);
-  return uniq(raw.map((x: unknown) => String(x).toLowerCase()));
+  const values = [row?.tag, row?.tags, row?.labels, row?.walletTags, row?.wallet_tags, row?.name, row?.identity?.tags, row?.identity?.platform, row?.identity?.name]
+    .flat(Infinity)
+    .filter(Boolean)
+    .map((x: unknown) => String(x).trim().toLowerCase())
+    .filter(Boolean);
+  return uniq(values);
 }
 
-function numeric(row: any, paths: string[][]): number | null {
-  for (const p of paths) {
-    let v: any = row;
-    for (const k of p) v = v?.[k];
-    const n = Number(v);
-    if (Number.isFinite(n)) return n;
+function num(value: unknown): number | null {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function hardBadTag(tags: string[]): string | null {
+  const joined = ` ${tags.join(" ")} `;
+  for (const tag of ["sniper", "bundler", "insider", "developer", " dev ", "bot", "mev", "exchange", "cex"]) {
+    if (joined.includes(tag)) return tag.trim();
   }
   return null;
 }
 
-async function birdeyeTrending(): Promise<string[]> {
-  if (!BIRDEYE_API_KEY) return [];
-  const q = new URLSearchParams({ sort_by: "rank", sort_type: "asc", interval: "24h", offset: "0", limit: String(Math.min(TOKEN_LIMIT, 50)) });
-  const body = await fetchJson(`https://public-api.birdeye.so/defi/token_trending?${q}`, { headers: { "X-API-KEY": BIRDEYE_API_KEY, "x-chain": "solana" } });
-  return tokenAddresses(body).slice(0, TOKEN_LIMIT);
+let lastBirdeyeCall = 0;
+async function birdeye(pathname: string, query: URLSearchParams): Promise<any> {
+  if (!BIRDEYE_API_KEY) return null;
+  const wait = BIRDEYE_MIN_INTERVAL_MS - (Date.now() - lastBirdeyeCall);
+  if (wait > 0) await sleep(wait);
+  lastBirdeyeCall = Date.now();
+  return fetchJson(`https://public-api.birdeye.so${pathname}?${query}`, {
+    headers: { "X-API-KEY": BIRDEYE_API_KEY, "x-chain": "solana" },
+  });
 }
 
-async function stTrending(): Promise<string[]> {
-  if (!ST_API_KEY) return [];
-  const body = await fetchJson(`https://data.solanatracker.io/tokens/trending/24h`, { headers: { "x-api-key": ST_API_KEY } });
-  return tokenAddresses(body).slice(0, TOKEN_LIMIT);
+async function birdeyeTrending(): Promise<string[]> {
+  if (!BIRDEYE_API_KEY) return [];
+  const query = new URLSearchParams({
+    sort_by: "rank",
+    sort_type: "asc",
+    interval: "24h",
+    offset: "0",
+    limit: String(Math.min(TOKEN_LIMIT, 50)),
+  });
+  return tokenAddresses(await birdeye("/defi/token_trending", query)).slice(0, TOKEN_LIMIT);
 }
 
 async function birdeyeTokenTraders(mint: string): Promise<any[]> {
   if (!BIRDEYE_API_KEY) return [];
-  const q = new URLSearchParams({
-    address: mint, time_frame: "30d", sort_type: "desc", sort_by: "realized_pnl", offset: "0",
-    limit: String(Math.min(TRADERS_PER_TOKEN, 10)), min_trade: "2",
+  const query = new URLSearchParams({
+    address: mint,
+    time_frame: "30d",
+    sort_type: "desc",
+    sort_by: "realized_pnl",
+    offset: "0",
+    limit: String(Math.min(TRADERS_PER_TOKEN, 10)),
+    min_trade: "2",
   });
-  const body = await fetchJson(`https://public-api.birdeye.so/defi/v2/tokens/top_traders?${q}`, { headers: { "X-API-KEY": BIRDEYE_API_KEY, "x-chain": "solana" } });
-  return objectsDeep(body).filter((x) => walletAddress(x)).slice(0, TRADERS_PER_TOKEN);
+  const body = await birdeye("/defi/v2/tokens/top_traders", query);
+  return objectsDeep(body).filter((row) => walletAddress(row)).slice(0, TRADERS_PER_TOKEN);
 }
 
-async function stTokenTraders(mint: string): Promise<any[]> {
-  if (!ST_API_KEY) return [];
-  const q = new URLSearchParams({ sort: "pnl", direction: "desc", limit: String(TRADERS_PER_TOKEN), pnlMode: "adjusted" });
-  const body = await fetchJson(`https://data.solanatracker.io/v2/pnl/tokens/${mint}/traders?${q}`, { headers: { "x-api-key": ST_API_KEY } });
-  return objectsDeep(body).filter((x) => walletAddress(x)).slice(0, TRADERS_PER_TOKEN);
+async function vybe(pathname: string, query?: URLSearchParams): Promise<any> {
+  if (!VYBE_API_KEY) return null;
+  const suffix = query && [...query.keys()].length ? `?${query}` : "";
+  return fetchJson(`https://api.vybenetwork.xyz${pathname}${suffix}`, {
+    headers: { "X-API-Key": VYBE_API_KEY },
+  });
 }
 
-async function stGlobalLeaderboard(): Promise<any[]> {
-  if (!ST_API_KEY) return [];
-  const q = new URLSearchParams({ days: "30", limit: String(GLOBAL_WALLET_LIMIT), pnlMode: "adjusted" });
-  const body = await fetchJson(`https://data.solanatracker.io/v2/pnl/leaderboard/top?${q}`, { headers: { "x-api-key": ST_API_KEY } });
-  return objectsDeep(body).filter((x) => walletAddress(x)).slice(0, GLOBAL_WALLET_LIMIT);
+async function vybeTokenTraders(mint: string): Promise<any[]> {
+  if (!VYBE_API_KEY) return [];
+  const query = new URLSearchParams({
+    resolution: "30d",
+    limit: String(Math.min(TRADERS_PER_TOKEN, 50)),
+    page: "0",
+    sortByDesc: "realizedPnlUsd",
+  });
+  const body = await vybe(`/v4/tokens/${mint}/top-pnl-traders`, query);
+  const rows = Array.isArray(body?.data) ? body.data : objectsDeep(body);
+  return rows.filter((row: any) => walletAddress(row)).slice(0, TRADERS_PER_TOKEN);
 }
 
-async function stWalletProfile(address: string): Promise<any | null> {
-  if (!ST_API_KEY) return null;
+async function vybeWalletPnl(address: string): Promise<any | null> {
+  if (!VYBE_API_KEY) return null;
   try {
-    return await fetchJson(`https://data.solanatracker.io/v2/pnl/wallets/${address}`, { headers: { "x-api-key": ST_API_KEY } });
-  } catch { return null; }
+    const query = new URLSearchParams({ resolution: "30d", sortByDesc: "realizedPnlUsd", limit: "100", page: "0" });
+    return await vybe(`/v4/wallets/${address}/pnl`, query);
+  } catch {
+    return null;
+  }
 }
 
 async function heliusRecent(address: string): Promise<any[] | null> {
   if (!HELIUS_API_KEY) return null;
   try {
-    const q = new URLSearchParams({ "api-key": HELIUS_API_KEY, limit: "25" });
-    const body = await fetchJson(`https://api.helius.xyz/v0/addresses/${address}/transactions?${q}`);
+    const query = new URLSearchParams({ "api-key": HELIUS_API_KEY, limit: "40" });
+    const body = await fetchJson(`https://api.helius.xyz/v0/addresses/${address}/transactions?${query}`);
     return Array.isArray(body) ? body : null;
-  } catch { return null; }
+  } catch {
+    return null;
+  }
+}
+
+async function mapConcurrent<T, R>(items: T[], concurrency: number, fn: (item: T, index: number) => Promise<R>): Promise<R[]> {
+  const out = new Array<R>(items.length);
+  let cursor = 0;
+  async function worker(): Promise<void> {
+    while (true) {
+      const index = cursor++;
+      if (index >= items.length) return;
+      out[index] = await fn(items[index]!, index);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(concurrency, Math.max(items.length, 1)) }, () => worker()));
+  return out;
 }
 
 async function entityType(address: string): Promise<{ valid: boolean; reason?: string; owner?: string }> {
   try {
     const result = await rpc("getAccountInfo", [address, { encoding: "base64", commitment: "confirmed" }]);
-    const v = result?.value;
-    if (!v) return { valid: true, reason: "uninitialized_or_closed_account" };
-    if (v.executable) return { valid: false, reason: "executable_program", owner: v.owner };
-    if (TOKEN_PROGRAMS.has(v.owner)) return { valid: false, reason: "token_account", owner: v.owner };
-    return { valid: true, owner: v.owner };
-  } catch { return { valid: true, reason: "entity_validation_unknown" }; }
-}
-
-function hardBadTag(tags: string[]) {
-  const joined = tags.join(" ");
-  for (const x of ["sniper", "bundler", "insider", "developer", " dev", "bot", "mev"]) if (joined.includes(x)) return x.trim();
-  return null;
-}
-
-async function loadState(): Promise<ScoutState> {
-  try { return JSON.parse(await fs.readFile(STATE_PATH, "utf8")); }
-  catch {
-    const t = now();
-    return { schemaVersion: 1, createdAt: t, updatedAt: t, wallets: {}, tokens: {}, runs: [] };
+    const value = result?.value;
+    if (!value) return { valid: true, reason: "uninitialized_or_closed_account" };
+    if (value.executable) return { valid: false, reason: "executable_program", owner: value.owner };
+    if (TOKEN_PROGRAMS.has(value.owner)) return { valid: false, reason: "token_account", owner: value.owner };
+    if (address === SYSTEM_PROGRAM) return { valid: false, reason: "system_program" };
+    return { valid: true, owner: value.owner };
+  } catch {
+    return { valid: true, reason: "entity_validation_unknown" };
   }
 }
 
-async function saveJson(file: string, data: unknown) {
-  await fs.mkdir(path.dirname(file), { recursive: true });
-  const tmp = `${file}.tmp`;
-  await fs.writeFile(tmp, JSON.stringify(data, null, 2));
-  await fs.rename(tmp, file);
+function emptyState(): ScoutState {
+  const timestamp = now();
+  return { schemaVersion: 2, createdAt: timestamp, updatedAt: timestamp, wallets: {}, tokens: {}, runs: [] };
 }
 
-function upsertWallet(state: ScoutState, row: any, provider: string, lane: Lane, mint?: string) {
+async function loadState(): Promise<ScoutState> {
+  try {
+    const parsed = JSON.parse(await fs.readFile(STATE_PATH, "utf8"));
+    return {
+      schemaVersion: 2,
+      createdAt: parsed.createdAt || now(),
+      updatedAt: parsed.updatedAt || now(),
+      wallets: parsed.wallets || {},
+      tokens: parsed.tokens || {},
+      runs: Array.isArray(parsed.runs) ? parsed.runs : [],
+    };
+  } catch {
+    return emptyState();
+  }
+}
+
+async function saveJson(file: string, data: unknown): Promise<void> {
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  const temp = `${file}.tmp`;
+  await fs.writeFile(temp, JSON.stringify(data, null, 2));
+  await fs.rename(temp, file);
+}
+
+function discoverySnapshot(row: any, provider: string): Record<string, unknown> {
+  if (provider === "vybe") {
+    return {
+      realizedPnlUsd: num(row?.realizedPnlUsd),
+      unrealizedPnlUsd: num(row?.unrealizedPnlUsd),
+      totalVolumeUsd: num(row?.totalVolumeUsd),
+      tradesCount: num(row?.tradesCount),
+      buyCount: num(row?.buyCount),
+      sellCount: num(row?.sellCount),
+    };
+  }
+  return {
+    realizedPnl: num(row?.realizedPnl ?? row?.realized_pnl ?? row?.totalPnl ?? row?.total_pnl),
+    unrealizedPnl: num(row?.unrealizedPnl ?? row?.unrealized_pnl),
+    volumeUsd: num(row?.volumeUsd ?? row?.volume_usd),
+    trades: num(row?.trade ?? row?.trades ?? row?.tradeCount ?? row?.trade_count),
+  };
+}
+
+function upsertWallet(state: ScoutState, row: any, provider: string, mint: string): { address: string | null; isNew: boolean } {
   const address = walletAddress(row);
   if (!address) return { address: null, isNew: false };
-  const t = now();
+  const timestamp = now();
   const tags = tagsFrom(row);
   const existing = state.wallets[address];
   if (!existing) {
     state.wallets[address] = {
-      address, firstSeen: t, lastSeen: t, rediscoveryCount: 1,
-      tokens: mint ? [mint] : [], providers: [provider], lanes: [lane], tags,
+      address,
+      firstSeen: timestamp,
+      lastSeen: timestamp,
+      rediscoveryCount: 1,
+      tokens: [mint],
+      providers: [provider],
+      lanes: ["TOKEN_WINNER"],
+      tags,
       status: "RAW",
-      snapshot: {
-        realizedPnl: numeric(row, [["realizedPnl"], ["realized_pnl"], ["period", "realized"], ["summary", "pnl", "realized"]]),
-        roi: numeric(row, [["roi"], ["period", "roi"], ["summary", "roi"]]),
-        winRate: numeric(row, [["winRate"], ["win_rate"], ["analysis", "winRate"]]),
-      },
+      discovery: { [provider]: discoverySnapshot(row, provider) },
     };
     return { address, isNew: true };
   }
-  existing.lastSeen = t;
-  existing.rediscoveryCount += 1;
-  existing.providers = uniq([...existing.providers, provider]);
-  existing.lanes = uniq([...existing.lanes, lane]);
-  existing.tags = uniq([...existing.tags, ...tags]);
-  if (mint) existing.tokens = uniq([...existing.tokens, mint]);
-  if (existing.tokens.length >= 2 && !existing.lanes.includes("CROSS_TOKEN")) existing.lanes.push("CROSS_TOKEN");
+  existing.lastSeen = timestamp;
+  existing.rediscoveryCount = Number(existing.rediscoveryCount || 0) + 1;
+  existing.tokens = uniq([...(existing.tokens || []), mint]);
+  existing.providers = uniq([...(existing.providers || []), provider]);
+  existing.tags = uniq([...(existing.tags || []), ...tags]);
+  existing.lanes = uniq([...(existing.lanes || ["TOKEN_WINNER"]), ...(existing.tokens.length >= 2 ? ["CROSS_TOKEN" as Lane] : [])]);
+  existing.discovery = { ...(existing.discovery || {}), [provider]: discoverySnapshot(row, provider) };
   return { address, isNew: false };
 }
 
-export async function runHarvest() {
+function profileScore(wallet: WalletRecord): number {
+  return (wallet.tokens?.length || 0) * 100 + (wallet.providers?.length || 0) * 20 + Math.min(wallet.rediscoveryCount || 0, 20);
+}
+
+function summarizeVybePnl(body: any): Record<string, unknown> | null {
+  const summary = body?.summary;
+  if (!summary || typeof summary !== "object") return null;
+  return {
+    winRate: num(summary.winRate),
+    realizedPnlUsd: num(summary.realizedPnlUsd),
+    unrealizedPnlUsd: num(summary.unrealizedPnlUsd),
+    uniqueTokensTraded: num(summary.uniqueTokensTraded),
+    averageTradeUsd: num(summary.averageTradeUsd),
+    tradesCount: num(summary.tradesCount),
+    winningTradesCount: num(summary.winningTradesCount),
+    losingTradesCount: num(summary.losingTradesCount),
+    tradesVolumeUsd: num(summary.tradesVolumeUsd),
+    bestPerformingToken: summary.bestPerformingToken ?? null,
+    worstPerformingToken: summary.worstPerformingToken ?? null,
+  };
+}
+
+function summarizeHelius(rows: any[] | null): Record<string, unknown> | null {
+  if (!rows) return null;
+  const swaps = rows.filter((tx) => tx?.type === "SWAP");
+  const timestamps = rows.map((tx) => Number(tx?.timestamp)).filter(Number.isFinite);
+  return {
+    transactionsFetched: rows.length,
+    swapsFetched: swaps.length,
+    newestTimestamp: timestamps.length ? Math.max(...timestamps) : null,
+    oldestTimestamp: timestamps.length ? Math.min(...timestamps) : null,
+    recentSwapSignatures: swaps.slice(0, 10).map((tx) => tx?.signature).filter(Boolean),
+  };
+}
+
+export async function runHarvest(): Promise<Record<string, unknown>> {
   const startedAt = now();
   const state = await loadState();
   const beforeUnique = Object.keys(state.wallets).length;
   const providerErrors: string[] = [];
-  let rawWalletHits = 0, duplicates = 0, invalidEntities = 0, cheapScreened = 0, rejected = 0, profiled = 0, unknown = 0;
+  const providerStatus = {
+    helius: Boolean(HELIUS_API_KEY),
+    birdeye: Boolean(BIRDEYE_API_KEY),
+    vybe: Boolean(VYBE_API_KEY),
+  };
 
-  const tokenSources = await Promise.allSettled([birdeyeTrending(), stTrending()]);
-  const tokenRows: Array<{ mint: string; provider: string }> = [];
-  for (let i = 0; i < tokenSources.length; i++) {
-    const r = tokenSources[i]!;
-    const provider = i === 0 ? "birdeye" : "solana_tracker";
-    if (r.status === "rejected") { providerErrors.push(`${provider}: ${String(r.reason)}`); continue; }
-    for (const mint of r.value) tokenRows.push({ mint, provider });
-  }
-  const tokenMap = new Map<string, string[]>();
-  for (const row of tokenRows) tokenMap.set(row.mint, uniq([...(tokenMap.get(row.mint) || []), row.provider]));
-  const tokens = [...tokenMap.keys()].slice(0, TOKEN_LIMIT);
-  for (const mint of tokens) {
-    const t = now();
-    const old = state.tokens[mint];
-    state.tokens[mint] = old ? { ...old, lastSeen: t, providers: uniq([...old.providers, ...(tokenMap.get(mint) || [])]), hits: old.hits + 1 } : { firstSeen: t, lastSeen: t, providers: tokenMap.get(mint) || [], hits: 1 };
+  let rawWalletHits = 0;
+  let duplicates = 0;
+  let invalidEntities = 0;
+  let tagRejected = 0;
+  let cheapScreened = 0;
+  let profiled = 0;
+  let unknown = 0;
+
+  let tokens: string[] = [];
+  try {
+    tokens = await birdeyeTrending();
+  } catch (error) {
+    providerErrors.push(`birdeye_trending: ${String(error)}`);
   }
 
-  const traderJobs: Array<Promise<{ provider: string; mint: string; rows: any[] }>> = [];
   for (const mint of tokens) {
-    if (BIRDEYE_API_KEY) traderJobs.push(birdeyeTokenTraders(mint).then((rows) => ({ provider: "birdeye", mint, rows })));
-    if (ST_API_KEY) traderJobs.push(stTokenTraders(mint).then((rows) => ({ provider: "solana_tracker", mint, rows })));
+    const timestamp = now();
+    const existing = state.tokens[mint];
+    state.tokens[mint] = existing
+      ? { ...existing, lastSeen: timestamp, providers: uniq([...(existing.providers || []), "birdeye"]), hits: Number(existing.hits || 0) + 1 }
+      : { firstSeen: timestamp, lastSeen: timestamp, providers: ["birdeye"], hits: 1 };
   }
-  const traderResults = await Promise.allSettled(traderJobs);
-  for (const result of traderResults) {
-    if (result.status === "rejected") { providerErrors.push(`token_traders: ${String(result.reason)}`); continue; }
-    for (const row of result.value.rows) {
+
+  const birdeyeResults: Array<{ mint: string; rows: any[] }> = [];
+  if (BIRDEYE_API_KEY) {
+    for (const mint of tokens) {
+      try {
+        birdeyeResults.push({ mint, rows: await birdeyeTokenTraders(mint) });
+      } catch (error) {
+        providerErrors.push(`birdeye_top_traders:${mint}: ${String(error)}`);
+      }
+    }
+  }
+
+  const vybeResults = VYBE_API_KEY
+    ? await mapConcurrent(tokens, VYBE_CONCURRENCY, async (mint) => {
+        try { return { mint, rows: await vybeTokenTraders(mint), error: null as string | null }; }
+        catch (error) { return { mint, rows: [] as any[], error: String(error) }; }
+      })
+    : [];
+
+  for (const result of vybeResults) {
+    if (result.error) providerErrors.push(`vybe_top_traders:${result.mint}: ${result.error}`);
+  }
+
+  for (const result of [...birdeyeResults.map((x) => ({ ...x, provider: "birdeye" })), ...vybeResults.map((x) => ({ ...x, provider: "vybe" }))]) {
+    for (const row of result.rows) {
       rawWalletHits++;
-      const hit = upsertWallet(state, row, result.value.provider, "TOKEN_WINNER", result.value.mint);
+      const hit = upsertWallet(state, row, result.provider, result.mint);
       if (hit.address && !hit.isNew) duplicates++;
     }
   }
 
-  if (ST_API_KEY) {
-    try {
-      for (const row of await stGlobalLeaderboard()) {
-        rawWalletHits++;
-        const hit = upsertWallet(state, row, "solana_tracker", "GLOBAL_LEADERBOARD");
-        if (hit.address && !hit.isNew) duplicates++;
-      }
-    } catch (e) { providerErrors.push(`global_leaderboard: ${String(e)}`); }
-  }
+  const candidates = Object.values(state.wallets)
+    .filter((wallet) => wallet.status !== "REJECTED")
+    .sort((a, b) => profileScore(b) - profileScore(a));
 
-  const newlySeen = Object.values(state.wallets).filter((w) => w.firstSeen >= startedAt).slice(0, 300);
-  for (const wallet of newlySeen) {
-    cheapScreened++;
-    const entity = await entityType(wallet.address);
-    if (!entity.valid) {
-      wallet.status = "REJECTED"; wallet.rejectionReason = entity.reason; invalidEntities++; rejected++; continue;
-    }
-    const badTag = hardBadTag(wallet.tags);
+  const entityQueue = candidates.slice(0, Math.max(PROFILE_LIMIT * 2, GLOBAL_WALLET_LIMIT));
+  for (const wallet of entityQueue) {
+    const badTag = hardBadTag(wallet.tags || []);
     if (badTag) {
-      wallet.status = "REJECTED"; wallet.rejectionReason = `tag_${badTag}`; rejected++; continue;
+      wallet.status = "REJECTED";
+      wallet.rejectionReason = `tag:${badTag}`;
+      tagRejected++;
+      continue;
+    }
+    const entity = await entityType(wallet.address);
+    cheapScreened++;
+    if (!entity.valid) {
+      wallet.status = "REJECTED";
+      wallet.rejectionReason = entity.reason || "invalid_entity";
+      invalidEntities++;
+      continue;
     }
     wallet.status = "CHEAP_PASS";
+    if (wallet.rejectionReason?.startsWith("tag:") || wallet.rejectionReason === "invalid_entity") delete wallet.rejectionReason;
   }
 
-  const toProfile = Object.values(state.wallets)
-    .filter((w) => w.status === "CHEAP_PASS")
-    .sort((a, b) => (b.tokens.length - a.tokens.length) || (b.rediscoveryCount - a.rediscoveryCount))
+  const profileQueue = Object.values(state.wallets)
+    .filter((wallet) => wallet.status === "CHEAP_PASS" || wallet.status === "PROFILED" || wallet.status === "UNKNOWN")
+    .sort((a, b) => profileScore(b) - profileScore(a))
     .slice(0, PROFILE_LIMIT);
-  for (const wallet of toProfile) {
-    const [pnl, txs] = await Promise.all([stWalletProfile(wallet.address), heliusRecent(wallet.address)]);
-    const swaps = txs?.filter((x: any) => x?.type === "SWAP") ?? null;
-    wallet.lastProfiledAt = now();
-    wallet.snapshot = { ...(wallet.snapshot || {}), solanaTrackerPnl: pnl, heliusRecentSwapCount: swaps?.length ?? null, heliusRecentTxCount: txs?.length ?? null };
-    if (!pnl && !txs) { wallet.status = "UNKNOWN"; unknown++; }
-    else { wallet.status = "PROFILED"; profiled++; }
-  }
 
-  const afterUnique = Object.keys(state.wallets).length;
+  await mapConcurrent(profileQueue, Math.min(VYBE_CONCURRENCY, 3), async (wallet) => {
+    const [vybePnl, helius] = await Promise.all([vybeWalletPnl(wallet.address), heliusRecent(wallet.address)]);
+    const vybeSummary = summarizeVybePnl(vybePnl);
+    const heliusSummary = summarizeHelius(helius);
+    wallet.lastProfiledAt = now();
+    wallet.profile = {
+      ...(wallet.profile || {}),
+      vybe30d: vybeSummary,
+      heliusRecent: heliusSummary,
+    };
+    if (vybeSummary || heliusSummary) {
+      wallet.status = "PROFILED";
+      profiled++;
+    } else {
+      wallet.status = "UNKNOWN";
+      wallet.rejectionReason = "profile_data_unavailable";
+      unknown++;
+    }
+  });
+
+  const totalUnique = Object.keys(state.wallets).length;
+  const newUniqueWallets = Math.max(totalUnique - beforeUnique, 0);
+  const rejectedTotal = Object.values(state.wallets).filter((wallet) => wallet.status === "REJECTED").length;
+  const crossTokenWallets = Object.values(state.wallets).filter((wallet) => (wallet.tokens?.length || 0) >= 2).length;
+  const multiProviderWallets = Object.values(state.wallets).filter((wallet) => (wallet.providers?.length || 0) >= 2).length;
+
   const telemetry = {
-    startedAt, finishedAt: now(),
-    configured: { helius: !!HELIUS_API_KEY, birdeye: !!BIRDEYE_API_KEY, solanaTracker: !!ST_API_KEY },
-    tokensSampled: tokens.length,
+    startedAt,
+    finishedAt: now(),
+    providers: providerStatus,
+    tokensExamined: tokens.length,
     rawWalletHits,
-    newUniqueWallets: afterUnique - beforeUnique,
-    duplicateWalletHits: duplicates,
-    invalidEntitiesExcluded: invalidEntities,
+    newUniqueWallets,
+    duplicates,
     cheapScreened,
-    rejected,
-    fullProfiled: profiled,
-    dataUnknown: unknown,
-    cumulativeUniqueWallets: afterUnique,
-    cumulativeTokensSeen: Object.keys(state.tokens).length,
-    providerErrors: providerErrors.slice(0, 25),
-    statePath: STATE_PATH,
+    invalidEntities,
+    tagRejected,
+    profiled,
+    unknown,
+    cumulativeUniqueWallets: totalUnique,
+    cumulativeRejectedWallets: rejectedTotal,
+    crossTokenWallets,
+    multiProviderWallets,
+    providerErrors,
   };
-  state.updatedAt = telemetry.finishedAt;
+
+  state.updatedAt = now();
   state.runs = [...state.runs.slice(-199), telemetry];
   await saveJson(STATE_PATH, state);
-  await saveJson(REPORT_PATH, telemetry);
-  return telemetry;
+
+  const ranked = Object.values(state.wallets)
+    .filter((wallet) => wallet.status === "PROFILED")
+    .sort((a, b) => profileScore(b) - profileScore(a))
+    .slice(0, 50)
+    .map((wallet) => ({
+      address: wallet.address,
+      status: wallet.status,
+      firstSeen: wallet.firstSeen,
+      lastSeen: wallet.lastSeen,
+      rediscoveryCount: wallet.rediscoveryCount,
+      uniqueTokensSeen: wallet.tokens?.length || 0,
+      providers: wallet.providers,
+      tags: wallet.tags,
+      profile: wallet.profile,
+    }));
+
+  const report = {
+    schemaVersion: 2,
+    generatedAt: now(),
+    telemetry,
+    note: "Harvest discovery/profile output only. A wallet is not LIVE-TEST WORTHY until downstream raw economic reconstruction and Odin 0.075-SOL follower replay pass.",
+    rankedDiscoveryCandidates: ranked,
+  };
+  await saveJson(REPORT_PATH, report);
+  return report;
 }
 
-const isMain = process.argv[1] && import.meta.url === new URL(`file://${path.resolve(process.argv[1])}`).href;
-if (isMain) {
-  runHarvest().then((r) => { console.log(JSON.stringify(r, null, 2)); }).catch((e) => { console.error(e); process.exitCode = 1; });
+if (import.meta.url === `file://${process.argv[1]}`) {
+  runHarvest()
+    .then((report) => {
+      console.log(JSON.stringify(report, null, 2));
+      process.exitCode = 0;
+    })
+    .catch((error) => {
+      console.error(error instanceof Error ? error.stack || error.message : String(error));
+      process.exitCode = 1;
+    });
 }
