@@ -44,7 +44,7 @@ function applyTags(w: any, tags: string[]) {
 async function enrichExistingWithCieloTags(state: AnyObj) {
   if (!CIELO_KEY || TAG_BATCH_LIMIT <= 0) return { requested: 0, credits: 0, rejected: 0, cacheHits: 0, errors: [] as string[] };
   const cache: TagCache = await readJson(TAG_CACHE_PATH, { version: 1, wallets: {} });
-  const eligible = Object.values(state.wallets || {}).filter((w: any) => ["RAW", "CHEAP_PASS", "UNKNOWN", "PROFILED"].includes(w?.status)).sort((a: any, b: any) => scoreWallet(b) - scoreWallet(a));
+  const eligible = (Object.values(state.wallets || {}) as any[]).filter((w: any) => ["RAW", "CHEAP_PASS", "UNKNOWN", "PROFILED"].includes(w?.status)).sort((a: any, b: any) => scoreWallet(b) - scoreWallet(a));
   let cacheHits = 0, rejected = 0; const due: string[] = [];
   for (const w of eligible) {
     const e = cache.wallets[w.address], age = e ? Date.now() - Date.parse(e.fetchedAt) : Infinity;
