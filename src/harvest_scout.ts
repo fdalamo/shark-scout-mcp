@@ -2,6 +2,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { PublicKey } from "@solana/web3.js";
 import { cieloDiscovery } from "./cielo_discovery.js";
+import { runDuneDiscoveryStage } from "./dune_discovery.js";
 import { runHarvest } from "./harvest_ultra.js";
 
 const CIELO_KEY = process.env.CIELO_API_KEY?.trim();
@@ -96,6 +97,8 @@ async function injectCieloDiscovery(state: AnyObj) {
 export async function runScoutHarvest() {
   const startedAt = now();
   const state = await readJson(STATE_PATH, { schemaVersion: 6, createdAt: startedAt, updatedAt: startedAt, wallets: {}, tokens: {}, runs: [] });
+  const dune = await runDuneDiscoveryStage(state);
+  console.log(JSON.stringify(dune));
   const tagEnrichment = await enrichExistingWithCieloTags(state);
   const discovery = await injectCieloDiscovery(state);
   state.updatedAt = now(); await atomicSave(STATE_PATH, state);
