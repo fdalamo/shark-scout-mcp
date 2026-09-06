@@ -12,7 +12,7 @@ const LOOKBACK_HOURS=clamp(Number(process.env.OPPORTUNITY_LOOKBACK_HOURS||48),12
 const MATCH_SECONDS=clamp(Number(process.env.OPPORTUNITY_MATCH_SECONDS||900),60,3600);
 const MAX_CAP=clamp(Number(process.env.OPPORTUNITY_MAX_DAILY_CAP||5),2,10);
 const FOLLOW_SIZE=.075,ODIN_RATE=.01,TIP_RATE=.003,NETWORK=.00015;
-const WSOL="So11111111111111111111111111111111111111112",USDC="EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",USDT="Es9vMFrzaCERmF4H2FYD4KCoNkY11McCe8BenwNYB";
+const WSOL="So11111111111111111111111111111111111111112",USDC="EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",USDT="Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB";
 const QUOTES=new Set([WSOL,USDC,USDT]);
 type AnyObj=Record<string,any>;
 type Event={wallet:string;signature:string;timestamp:number;side:"BUY"|"SELL";mint:string;qty:number|null;quoteSol:number|null};
