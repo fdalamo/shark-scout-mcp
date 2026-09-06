@@ -7,6 +7,7 @@ const TIMEOUT_MS=Math.max(3000,Math.min(60000,Number(process.env.REQUEST_TIMEOUT
 const BASE="https://feed-api.cielo.finance/api/v1";
 
 type AnyObj=Record<string,any>;
+type GateStatus="PASS"|"SIGNAL_ONLY"|"REJECT"|"UNKNOWN";
 
 function sleep(ms:number){return new Promise(r=>setTimeout(r,ms));}
 function num(v:any){if(typeof v==="number"&&Number.isFinite(v))return v;if(typeof v==="string"){const n=Number(v.replace(/[,$%]/g,""));return Number.isFinite(n)?n:null;}return null;}
@@ -16,15 +17,15 @@ function pickByKeys(x:any,patterns:RegExp[],parser:(v:any)=>number|null=num){for
 function normalizeRate(v:number|null){if(v==null)return null;return v>1?v/100:v;}
 function summarize(trading:any,total:any,tokens:any){let winRate=pickByKeys(trading,[/(^|\.)win[_-]?rate$/,/(^|\.)token[_-]?winrate$/,/(^|\.)winrate$/]);winRate=normalizeRate(winRate);let medianHoldSeconds=pickByKeys(trading,[/median.*hold.*seconds/,/median.*holding.*seconds/]);if(medianHoldSeconds==null)medianHoldSeconds=pickByKeys(trading,[/median.*hold/,/median.*holding/],parseDuration);const tokensTraded=pickByKeys(trading,[/(^|\.)(tokens[_-]?traded|token[_-]?count|total[_-]?tokens)$/]);const realizedPnl=pickByKeys(total,[/realized.*pnl/,/total.*pnl/])??pickByKeys(trading,[/realized.*pnl/]);let realizedRoi=pickByKeys(total,[/realized.*roi/,/(^|\.)roi$/])??pickByKeys(trading,[/realized.*roi/]);realizedRoi=normalizeRate(realizedRoi);let tokenRows=0;if(Array.isArray(tokens))tokenRows=tokens.length;else if(Array.isArray(tokens?.data))tokenRows=tokens.data.length;else if(Array.isArray(tokens?.items))tokenRows=tokens.items.length;return{winRate,medianHoldSeconds,tokensTraded,realizedPnl,realizedRoi,tokenRows};}
 async function cielo(path:string,query:string){if(!CIELO_API_KEY)throw new Error("CIELO_API_KEY missing");const url=`${BASE}${path}${query}`;for(let a=0;a<3;a++){const c=new AbortController(),t=setTimeout(()=>c.abort(),TIMEOUT_MS);try{const r=await fetch(url,{headers:{"X-API-KEY":CIELO_API_KEY},signal:c.signal});const text=await r.text();if(r.status===202){if(a<2){await sleep(10000);continue;}throw new Error("202:data_not_ready");}if(!r.ok)throw new Error(`${r.status}:${text.slice(0,160)}`);return text?JSON.parse(text):{};}finally{clearTimeout(t);}}throw new Error("cielo request failed");}
-function validate(candidate:any,s:any){const reasons:string[]=[];let status:"PASS"|"SIGNAL_ONLY"|"REJECT"|"UNKNOWN"="PASS";const scoutMed=num(candidate?.hold?.medianHoldSeconds),closed=num(candidate?.hold?.closedHolds)||0,externalMed=s.medianHoldSeconds as number|null,wr=s.winRate as number|null,tok=s.tokensTraded as number|null;
- if(externalMed==null&&wr==null&&tok==null)return{status:"UNKNOWN",reasons:["cielo_fields_unparsed"]};
- if(externalMed!=null&&externalMed<600){status="REJECT";reasons.push("cielo_median_hold_under_10m");}
- else if(externalMed!=null&&externalMed<3600){if(status!=="REJECT")status="SIGNAL_ONLY";reasons.push("cielo_median_hold_under_1h");}
- else if(externalMed!=null&&externalMed<21600){if(status==="PASS")status="SIGNAL_ONLY";reasons.push("cielo_median_hold_under_6h");}
- if(wr!=null&&tok!=null&&tok>=20&&wr<.20){status="REJECT";reasons.push("cielo_win_rate_under_20pct");}
- else if(wr!=null&&tok!=null&&tok>=20&&wr<.30){if(status!=="REJECT")status="SIGNAL_ONLY";reasons.push("cielo_win_rate_under_30pct");}
- if(scoutMed!=null&&externalMed!=null&&externalMed>0){const ratio=Math.max(scoutMed/externalMed,externalMed/scoutMed);if(ratio>=3){if(status==="PASS")status="SIGNAL_ONLY";reasons.push(`hold_median_discrepancy_${ratio.toFixed(1)}x`);}}
- if(tok!=null&&tok>=20&&closed>0){const coverage=closed/tok;if(coverage<.25){if(status==="PASS")status="SIGNAL_ONLY";reasons.push(`reconstructed_sample_coverage_${(coverage*100).toFixed(1)}pct`);}}
+function validate(candidate:any,s:any){const reasons:string[]=[];let status:GateStatus="PASS";const rank:Record<GateStatus,number>={UNKNOWN:0,PASS:1,SIGNAL_ONLY:2,REJECT:3};const downgrade=(next:GateStatus)=>{if(rank[next]>rank[status])status=next;};const scoutMed=num(candidate?.hold?.medianHoldSeconds),closed=num(candidate?.hold?.closedHolds)||0,externalMed=s.medianHoldSeconds as number|null,wr=s.winRate as number|null,tok=s.tokensTraded as number|null;
+ if(externalMed==null&&wr==null&&tok==null)return{status:"UNKNOWN" as GateStatus,reasons:["cielo_fields_unparsed"]};
+ if(externalMed!=null&&externalMed<600){downgrade("REJECT");reasons.push("cielo_median_hold_under_10m");}
+ else if(externalMed!=null&&externalMed<3600){downgrade("SIGNAL_ONLY");reasons.push("cielo_median_hold_under_1h");}
+ else if(externalMed!=null&&externalMed<21600){downgrade("SIGNAL_ONLY");reasons.push("cielo_median_hold_under_6h");}
+ if(wr!=null&&tok!=null&&tok>=20&&wr<.20){downgrade("REJECT");reasons.push("cielo_win_rate_under_20pct");}
+ else if(wr!=null&&tok!=null&&tok>=20&&wr<.30){downgrade("SIGNAL_ONLY");reasons.push("cielo_win_rate_under_30pct");}
+ if(scoutMed!=null&&externalMed!=null&&externalMed>0){const ratio=Math.max(scoutMed/externalMed,externalMed/scoutMed);if(ratio>=3){downgrade("SIGNAL_ONLY");reasons.push(`hold_median_discrepancy_${ratio.toFixed(1)}x`);}}
+ if(tok!=null&&tok>=20&&closed>0){const coverage=closed/tok;if(coverage<.25){downgrade("SIGNAL_ONLY");reasons.push(`reconstructed_sample_coverage_${(coverage*100).toFixed(1)}pct`);}}
  if(!reasons.length)reasons.push("cielo_external_validation_pass");return{status,reasons};}
 
 export async function runCieloValidation(){const startedAt=new Date().toISOString();if(!CIELO_API_KEY){console.log(JSON.stringify({event:"shark_scout_cielo_validation_skipped",reason:"CIELO_API_KEY_missing"}));return;}
