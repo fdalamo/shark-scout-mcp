@@ -1,14 +1,16 @@
 # Shark Scout wallet harvester
 
-The repository now includes `src/harvest.ts`, a persistent Solana wallet discovery pass.
+`src/harvest.ts` is the persistent Solana wallet-discovery/profile pass for Shark Scout.
 
 ## Required API variables
 
-Set these as Railway service variables. Never commit the actual values.
+Set real values only in Railway Variables. Never commit keys.
 
 - `HELIUS_API_KEY`
 - `BIRDEYE_API_KEY`
-- `SOLANA_TRACKER_API_KEY`
+- `VYBE_API_KEY`
+
+Solana Tracker is no longer required. Vybe is the secondary trader/PnL provider.
 
 Optional:
 
@@ -29,8 +31,10 @@ The registry keeps exact base58 wallet addresses, first/last seen, rediscovery c
 - `HARVEST_TRADERS_PER_TOKEN=10`
 - `HARVEST_GLOBAL_WALLET_LIMIT=50`
 - `HARVEST_PROFILE_LIMIT=40`
+- `BIRDEYE_MIN_INTERVAL_MS=1100`
+- `VYBE_CONCURRENCY=3`
 
-Increase only after checking provider quotas and runtime.
+The Birdeye delay deliberately stays below 60 requests/minute. Increase breadth only after checking provider quotas, errors, and runtime.
 
 ## Running
 
@@ -47,21 +51,28 @@ One harvesting cycle:
 npm run harvest
 ```
 
-For production, create a second Railway service from this same repository and override its start command to `npm run harvest`. Schedule that service hourly with Railway Cron. Attach the `/data` Volume to that harvester service so cumulative state survives deployments/restarts. Keep the existing browser API service running with `npm start`.
+For production, use a second Railway service from this same repository with start command `npm run harvest`, scheduled hourly. Keep the browser/MCP API service running with `npm start`.
 
-## Discovery lanes implemented
+Railway Volumes attach to a single service. The durable `/data` volume must be attached to the service that actually runs `npm run harvest`. If the current volume is attached to the browser service, move it to the harvester worker when that worker is created.
 
-1. Birdeye trending-token discovery.
-2. Solana Tracker trending-token discovery.
-3. Birdeye token top traders ranked by 30-day realized PnL.
-4. Solana Tracker token PnL traders.
-5. Solana Tracker global 30-day PnL leaderboard.
-6. Cross-token recurrence scoring through the persistent registry.
-7. Cheap exclusion of executable programs, token accounts, and tagged sniper/bundler/insider/dev/bot/MEV candidates.
-8. Solana Tracker wallet PnL profile enrichment and Helius recent-transaction/SWAP enrichment for the strongest cheap-screen survivors.
+## Discovery/profile lanes implemented
 
-The output includes per-run and cumulative telemetry. Full Odin 0.075-SOL copyability/replay remains the downstream Shark Scout forensic stage rather than an automatic promotion from headline PnL.
+1. Birdeye 24h trending-token universe.
+2. Birdeye token Top Traders ranked by 30-day realized PnL.
+3. Vybe `GET /v4/tokens/{mint}/top-pnl-traders`, also ranked by 30-day realized PnL.
+4. Exact base58 canonicalization and persistent deduplication.
+5. Cross-token recurrence and multi-provider confirmation.
+6. Cheap exclusion of executable programs, token accounts, and tagged sniper/bundler/insider/dev/bot/MEV/CEX candidates.
+7. Vybe 30-day wallet PnL enrichment.
+8. Helius recent enhanced-transaction/SWAP enrichment for prioritized survivors.
+9. Retry/backoff and provider-error telemetry instead of silently treating missing data as inactivity.
+
+`latest-harvest.json` includes per-run telemetry, cumulative unique-wallet counts, rejection counts, cross-token recurrence, multi-provider confirmation, provider availability/errors, and the strongest profiled discovery candidates.
+
+## Important qualification
+
+A profitable API profile is not a copy-trading recommendation. Harvest output remains upstream discovery. Promotion to LIVE-TEST WORTHY still requires the downstream Shark Scout forensic stage: raw economic reconstruction, hold-time/downside/jackpot analysis, entry liquidity/market-cap checks, and a 0.075-SOL Odin follower replay including fees, slippage, execution lag and exit transferability.
 
 ## Security
 
-This repository is public. Never put API keys in `.env.example`, source, commits, issues, logs, or README files. Use Railway Variables or GitHub Actions Secrets only.
+This repository is public. Never put API keys in `.env.example`, source, commits, issues, logs, README files, screenshots, or chat. Use Railway Variables only.
