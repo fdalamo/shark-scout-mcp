@@ -1,6 +1,6 @@
 {
   "name": "shark-scout-mcp",
-  "version": "0.17.0",
+  "version": "0.18.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -9,6 +9,7 @@
     "start": "node dist/browser.js",
     "maintenance": "node dist/maintenance.js",
     "odin-sync": "node dist/odin_sync.js",
+    "dune-discovery": "node dist/dune_discovery.js",
     "harvest": "node dist/maintenance.js && node dist/odin_sync.js && node dist/harvest_scout.js && node dist/gauntlet_v6.js && node dist/cielo_validate.js",
     "gauntlet": "node dist/maintenance.js && node dist/odin_sync.js && node dist/gauntlet_v6.js && node dist/cielo_validate.js"
   },
