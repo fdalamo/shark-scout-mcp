@@ -23,10 +23,19 @@ function sleep(ms:number){return new Promise(r=>setTimeout(r,ms));}
 async function atomic(file:string,data:any){await fs.mkdir(path.dirname(file),{recursive:true});const tmp=`${file}.${process.pid}.tmp`;await fs.writeFile(tmp,JSON.stringify(data));await fs.rename(tmp,file);}
 async function json(file:string,fallback:any){try{return JSON.parse(await fs.readFile(file,"utf8"));}catch{return fallback;}}
 
+function replayFromResult(r:any){
+  const trips=Array.isArray(r?.hold?.roundTrips)?r.hold.roundTrips:[];
+  const nets=trips.map((x:any)=>finite(x?.followerNetSol)).filter((x:any):x is number=>x!==null);
+  const stress=trips.map((x:any)=>finite(x?.stress50NetSol)).filter((x:any):x is number=>x!==null);
+  if(nets.length)return{trades:nets.length,net:nets.reduce((a:number,b:number)=>a+b,0),stress:stress.length?stress.reduce((a:number,b:number)=>a+b,0):null};
+  const legacy=r?.replay?.twoPerDay||{};
+  return{trades:n(legacy.selected),net:finite(legacy.netSol),stress:finite(legacy.stress50NetSol)};
+}
+
 function classify(r:any){
   const status=String(r?.verdict?.status||"UNKNOWN"),stage=String(r?.verdict?.stage||"unknown"),reasons:string[]=Array.isArray(r?.verdict?.reasons)?r.verdict.reasons:[];
-  const h=r?.hold||{},rp=r?.replay?.twoPerDay||{},q=r?.dataQuality||{};
-  const closed=n(h.closedHolds),buys=n(h.buyEvents),trades=n(rp.selected),net=finite(rp.netSol),stress=finite(rp.stress50NetSol),med=n(h.medianHoldSeconds),tokens=n(r.discoveryTokens),coverage=buys>0?Math.min(1,closed/buys):0;
+  const h=r?.hold||{},q=r?.dataQuality||{},rp=replayFromResult(r);
+  const closed=n(h.closedHolds),buys=n(h.buyEvents),trades=rp.trades,net=rp.net,stress=rp.stress,med=n(h.medianHoldSeconds),tokens=n(r.discoveryTokens),coverage=buys>0?Math.min(1,closed/buys):0;
   const positiveReplay=trades>=3&&net!==null&&net>0;
   const stressPositive=stress!==null&&stress>0;
   const longHold=med>=3600;
@@ -53,7 +62,7 @@ function classify(r:any){
 
   if(status==="REJECT"&&positiveReplay&&stressPositive&&longHold&&!hardFast&&!badEconomics)bucket="NEAR_PASS_STRESS";
   else if(trades===0&&longHold&&closed>=10)bucket="REPLAY_RECONSTRUCTION";
-  else if(r?.heliusCoveragePartial||reasons.some(x=>String(x).includes("history_window_partial"))||coverage<0.35&&buys>=10)bucket="HISTORY_RECONSTRUCTION";
+  else if(r?.heliusCoveragePartial||reasons.some(x=>String(x).includes("history_window_partial"))||(coverage<0.35&&buys>=10))bucket="HISTORY_RECONSTRUCTION";
   else if(status==="UNKNOWN"&&(r?.heliusError||r?.vybeError||stage==="evaluation_error"))bucket="PROVIDER_RETRY";
   else if(reasons.some(x=>String(x).includes("single_discovery")))bucket="CONTEXT_EXPANSION";
   else if(status==="SIGNAL_ONLY"&&longHold)bucket="ECONOMICS_INCOMPLETE";
@@ -63,6 +72,12 @@ function classify(r:any){
 
   const reinvestigableReject=status==="REJECT"&&!hardFast&&!badEconomics&&(bucket==="NEAR_PASS_STRESS"||bucket==="HISTORY_RECONSTRUCTION"||bucket==="REPLAY_RECONSTRUCTION"||bucket==="CONTEXT_EXPANSION");
   return{priority,bucket,status,stage,reasons,coverage,closed,buys,trades,net,stress,reinvestigableReject};
+}
+
+function cooldownFor(old:any){
+  const attempts=n(old?.attempts),zeroRows=n(old?.rowsFetched)===0;
+  if(!zeroRows||attempts<=1)return COOLDOWN_HOURS;
+  return Math.min(72,COOLDOWN_HOURS*Math.pow(2,Math.min(2,attempts-1)));
 }
 
 let nextAt=0;
@@ -109,7 +124,7 @@ export async function runDeepDiveReinvestigation(){
   const candidates:QueueEntry[]=[];
   for(const [address,r] of Object.entries(results)){
     if(!wallets[address])continue;
-    const c=classify(r),old=history[address]||{},cooling=old.lastAttemptAt&&ageHours(old.lastAttemptAt)<COOLDOWN_HOURS,stateStatus=String(wallets[address]?.status||"");
+    const c=classify(r),old=history[address]||{},effectiveCooldown=cooldownFor(old),cooling=old.lastAttemptAt&&ageHours(old.lastAttemptAt)<effectiveCooldown,stateStatus=String(wallets[address]?.status||"");
     if(stateStatus==="REJECTED"&&!c.reinvestigableReject)continue;
     const eligibleStatus=c.status==="UNKNOWN"||c.status==="SIGNAL_ONLY"||c.reinvestigableReject;
     if(!eligibleStatus||cooling||c.priority<=0)continue;
@@ -120,15 +135,15 @@ export async function runDeepDiveReinvestigation(){
   const selected=candidates.slice(0,BATCH),outcomes:any[]=[];
   for(const item of selected){
     const hx=await helius(item.address,item.bucket),now=new Date().toISOString();
-    if(hx.rows.length){await fs.mkdir(CACHE_DIR,{recursive:true});await atomic(path.join(CACHE_DIR,`${item.address}.json`),{generatedAt:now,source:"deep_dive_reinvestigation_v2",mode:hx.mode,pagesRequested:{swap:PAGES,unfiltered:FALLBACK_PAGES},pagesFetched:hx.pagesFetched,partial:hx.partial,rows:hx.rows});delete results[item.address];}
+    if(hx.rows.length){await fs.mkdir(CACHE_DIR,{recursive:true});await atomic(path.join(CACHE_DIR,`${item.address}.json`),{generatedAt:now,source:"deep_dive_reinvestigation_v3",mode:hx.mode,pagesRequested:{swap:PAGES,unfiltered:FALLBACK_PAGES},pagesFetched:hx.pagesFetched,partial:hx.partial,rows:hx.rows});delete results[item.address];}
     const record={...item,selectedAt:startedAt,lastAttemptAt:now,attempts:n(item.attempts)+1,rowsFetched:hx.rows.length,swapRows:hx.swapRows,unfilteredRows:hx.unfilteredRows,pagesFetched:hx.pagesFetched,fetchMode:hx.mode,partial:hx.partial,error:hx.error||null,invalidatedForGauntlet:hx.rows.length>0};
     history[item.address]=record;outcomes.push(record);
   }
   cp.results=results;cp.updatedAt=new Date().toISOString();await atomic(CHECKPOINT_PATH,cp);
   const bucketCounts=candidates.reduce((a:AnyObj,x)=>(a[x.bucket]=(a[x.bucket]||0)+1,a),{});
   const run={startedAt,finishedAt:new Date().toISOString(),candidateCount:candidates.length,selectedCount:selected.length,invalidatedForGauntlet:outcomes.filter(x=>x.invalidatedForGauntlet).length,rowsFetched:outcomes.reduce((a,x)=>a+n(x.rowsFetched),0),unfilteredRows:outcomes.reduce((a,x)=>a+n(x.unfilteredRows),0),bucketCounts,selected:outcomes};
-  await atomic(QUEUE_PATH,{schemaVersion:2,updatedAt:new Date().toISOString(),policy:{batch:BATCH,swapPages:PAGES,unfilteredFallbackPages:FALLBACK_PAGES,cooldownHours:COOLDOWN_HOURS,sort:"stage-specific evidence-gap queue: near-pass stress > replay reconstruction > history reconstruction > provider retry > context expansion > economics incomplete; rejected wallets re-enter only for evidence/sample gaps, never hard-fast or known-bad economics"},entries:history,runs:[...(Array.isArray(prev.runs)?prev.runs.slice(-79):[]),run],queue:candidates.slice(0,50)});
-  console.log(JSON.stringify({event:"shark_scout_deep_dive_reinvestigation_complete",schemaVersion:2,...run,selected:outcomes.map(x=>({address:x.address,priority:x.priority,bucket:x.bucket,previousStatus:x.status,stateStatus:x.stateStatus,coverage:x.coverage,replayTrades:x.replayTrades,replayNet:x.replayNet,stress50:x.stress50,rowsFetched:x.rowsFetched,swapRows:x.swapRows,unfilteredRows:x.unfilteredRows,fetchMode:x.fetchMode,invalidatedForGauntlet:x.invalidatedForGauntlet,error:x.error}))}));
+  await atomic(QUEUE_PATH,{schemaVersion:3,updatedAt:new Date().toISOString(),policy:{batch:BATCH,swapPages:PAGES,unfilteredFallbackPages:FALLBACK_PAGES,cooldownHours:COOLDOWN_HOURS,zeroResultBackoff:"12h -> 24h -> 48h -> 72h cap",replaySource:"hold.roundTrips followerNetSol/stress50NetSol with legacy fallback",sort:"stage-specific evidence-gap queue: near-pass stress > replay reconstruction > history reconstruction > provider retry > context expansion > economics incomplete; rejected wallets re-enter only for evidence/sample gaps, never hard-fast or known-bad economics"},entries:history,runs:[...(Array.isArray(prev.runs)?prev.runs.slice(-79):[]),run],queue:candidates.slice(0,50)});
+  console.log(JSON.stringify({event:"shark_scout_deep_dive_reinvestigation_complete",schemaVersion:3,...run,selected:outcomes.map(x=>({address:x.address,priority:x.priority,bucket:x.bucket,previousStatus:x.status,stateStatus:x.stateStatus,coverage:x.coverage,replayTrades:x.replayTrades,replayNet:x.replayNet,stress50:x.stress50,rowsFetched:x.rowsFetched,swapRows:x.swapRows,unfilteredRows:x.unfilteredRows,fetchMode:x.fetchMode,invalidatedForGauntlet:x.invalidatedForGauntlet,error:x.error}))}));
   return run;
 }
 
