@@ -1,14 +1,14 @@
 {
   "name": "shark-scout-mcp",
-  "version": "0.13.0",
+  "version": "0.14.0",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/browser.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/browser.js",
-    "harvest": "node dist/harvest_free.js && node dist/gauntlet_v5.js",
-    "gauntlet": "node dist/gauntlet_v5.js"
+    "harvest": "node dist/harvest_ultra.js && node dist/gauntlet_v6.js",
+    "gauntlet": "node dist/gauntlet_v6.js"
   },
   "engines": {
     "node": ">=20"
