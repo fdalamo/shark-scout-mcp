@@ -2,16 +2,20 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 
 const KEY = process.env.CIELO_API_KEY?.trim();
+const CIELO_ENABLED = /^(1|true|yes)$/i.test(process.env.CIELO_VALIDATION_ENABLED || "true");
 const BASE = "https://feed-api.cielo.finance/api/v1";
 const REPORT_PATH = process.env.SCOUT_GAUNTLET_PATH || "/data/latest-gauntlet.json";
 const CHECKPOINT_PATH = process.env.SCOUT_GAUNTLET_STATE_PATH || "/data/gauntlet-state.json";
 const CACHE_PATH = process.env.SCOUT_CIELO_VALIDATION_CACHE_PATH || "/data/cielo-validation-cache.json";
 const TIMEOUT_MS = clamp(Number(process.env.REQUEST_TIMEOUT_MS || 25000), 3000, 60000);
 const CACHE_TTL_MS = clamp(Number(process.env.CIELO_VALIDATION_HOURS || 12), 1, 72) * 3600_000;
+const EXTERNAL_REJECTS = new Set((process.env.SCOUT_EXTERNAL_REJECTS || "").split(",").map(x => x.trim()).filter(Boolean));
 
 type AnyObj = Record<string, any>;
 type GateStatus = "PASS" | "SIGNAL_ONLY" | "REJECT" | "UNKNOWN";
 type Cache = { version: 1; wallets: Record<string, { fetchedAt: string; trading: any; tokens?: any }> };
+
+class CieloPlanRestrictedError extends Error {}
 
 function clamp(n: number, min: number, max: number) { return Math.max(min, Math.min(max, Number.isFinite(n) ? n : min)); }
 function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
@@ -33,7 +37,21 @@ function summarizeTrading(trading: any) {
 }
 function summarizeTokens(tokens: any) { const rows = tokenRows(tokens), positives = rows.map(pnlOf).filter((v): v is number => v != null && v > 0); const totalPositive = positives.reduce((a, b) => a + b, 0), maxPositive = positives.length ? Math.max(...positives) : 0; return { tokenRows: rows.length, largestWinnerShare: totalPositive > 0 ? maxPositive / totalPositive : null }; }
 async function atomicSave(file: string, data: any) { await fs.mkdir(path.dirname(file), { recursive: true }); const tmp = `${file}.${process.pid}.tmp`; await fs.writeFile(tmp, JSON.stringify(data)); await fs.rename(tmp, file); }
-async function cielo(pathname: string, query: string) { if (!KEY) throw new Error("CIELO_API_KEY_missing"); for (let a = 0; a < 3; a++) { const c = new AbortController(), t = setTimeout(() => c.abort(), TIMEOUT_MS); try { const r = await fetch(`${BASE}${pathname}${query}`, { headers: { "X-API-KEY": KEY }, signal: c.signal }); const text = await r.text(); if (r.status === 202) { if (a < 2) { await sleep(10000); continue; } throw new Error("202:data_not_ready"); } if (!r.ok) throw new Error(`${r.status}:${text.slice(0, 180)}`); return text ? JSON.parse(text) : {}; } finally { clearTimeout(t); } } throw new Error("cielo_request_failed"); }
+async function cielo(pathname: string, query: string) {
+  if (!KEY) throw new Error("CIELO_API_KEY_missing");
+  for (let a = 0; a < 3; a++) {
+    const c = new AbortController(), t = setTimeout(() => c.abort(), TIMEOUT_MS);
+    try {
+      const r = await fetch(`${BASE}${pathname}${query}`, { headers: { "X-API-KEY": KEY }, signal: c.signal });
+      const text = await r.text();
+      if (r.status === 403 && /plan does not include access|upgrade your subscription/i.test(text)) throw new CieloPlanRestrictedError("403:cielo_plan_restricted");
+      if (r.status === 202) { if (a < 2) { await sleep(10000); continue; } throw new Error("202:data_not_ready"); }
+      if (!r.ok) throw new Error(`${r.status}:${text.slice(0, 180)}`);
+      return text ? JSON.parse(text) : {};
+    } finally { clearTimeout(t); }
+  }
+  throw new Error("cielo_request_failed");
+}
 
 function validate(candidate: any, s: any): { status: GateStatus; reasons: string[] } {
   const reasons: string[] = []; let status: GateStatus = "PASS";
@@ -54,41 +72,66 @@ function validate(candidate: any, s: any): { status: GateStatus; reasons: string
   return { status, reasons };
 }
 
+function applyReject(cp: AnyObj, address: string, reason: string, validation: AnyObj) {
+  const r = cp?.results?.[address];
+  if (!r) return;
+  r.externalValidation = validation;
+  r.verdict = { status: "REJECT", stage: "external_validation", reasons: [...new Set([...(r.verdict?.reasons || []), reason])] };
+}
+
 export async function runCieloValidation() {
   const startedAt = new Date().toISOString();
-  if (!KEY) { console.log(JSON.stringify({ event: "shark_scout_cielo_validation_skipped", reason: "CIELO_API_KEY_missing" })); return; }
   let report: AnyObj, cp: AnyObj;
-  try { report = JSON.parse(await fs.readFile(REPORT_PATH, "utf8")); cp = JSON.parse(await fs.readFile(CHECKPOINT_PATH, "utf8")); } catch (e) { console.log(JSON.stringify({ event: "shark_scout_cielo_validation_skipped", reason: "gauntlet_files_unavailable", error: String(e) })); return; }
+  try { report = JSON.parse(await fs.readFile(REPORT_PATH, "utf8")); cp = JSON.parse(await fs.readFile(CHECKPOINT_PATH, "utf8")); }
+  catch (e) { console.log(JSON.stringify({ event: "shark_scout_cielo_validation_skipped", reason: "gauntlet_files_unavailable", error: String(e) })); return; }
+
   const cache: Cache = await (async () => { try { const x = JSON.parse(await fs.readFile(CACHE_PATH, "utf8")); return { version: 1, wallets: x?.wallets || {} }; } catch { return { version: 1, wallets: {} }; } })();
   const candidates = Array.isArray(report.deepDive) ? report.deepDive : [], validations: any[] = [];
-  let requests = 0, cacheHits = 0, estimatedCredits = 0, tokenPnlSkipped = 0;
+  let requests = 0, attempts = 0, cacheHits = 0, estimatedCredits = 0, tokenPnlSkipped = 0, planRestricted = false;
+
   for (const c of candidates) {
     const address = String(c?.address || ""); if (!address) continue;
+    if (EXTERNAL_REJECTS.has(address)) {
+      const external = { provider: "manual_external_evidence", timeframe: "30d", checkedAt: new Date().toISOString(), status: "REJECT", reasons: ["known_external_validation_reject"] };
+      validations.push({ address, ...external });
+      applyReject(cp, address, "known_external_validation_reject", external);
+      continue;
+    }
+    if (!CIELO_ENABLED || !KEY || planRestricted) {
+      validations.push({ address, provider: "cielo", timeframe: "30d", status: "UNKNOWN", reasons: [!CIELO_ENABLED ? "cielo_validation_disabled" : !KEY ? "CIELO_API_KEY_missing" : "cielo_plan_restricted"] });
+      continue;
+    }
     try {
       const cached = cache.wallets[address], age = cached ? Date.now() - Date.parse(cached.fetchedAt) : Infinity;
       let trading: any;
       if (cached && Number.isFinite(age) && age < CACHE_TTL_MS) { trading = cached.trading; cacheHits++; }
-      else { trading = await cielo(`/${address}/trading-stats`, "?days=30d"); requests++; estimatedCredits += 30; cache.wallets[address] = { fetchedAt: new Date().toISOString(), trading }; }
+      else { attempts++; trading = await cielo(`/${address}/trading-stats`, "?days=30d"); requests++; estimatedCredits += 30; cache.wallets[address] = { fetchedAt: new Date().toISOString(), trading }; }
       let summary: any = summarizeTrading(trading), preliminary = validate(c, summary);
       if (preliminary.status === "PASS") {
         let tokens: any;
         const freshCached = cache.wallets[address], sameFresh = freshCached?.tokens && Number.isFinite(Date.now() - Date.parse(freshCached.fetchedAt)) && Date.now() - Date.parse(freshCached.fetchedAt) < CACHE_TTL_MS;
         if (sameFresh) { tokens = freshCached.tokens; cacheHits++; }
-        else { tokens = await cielo(`/${address}/pnl/tokens`, "?timeframe=30d&chain=solana"); requests++; estimatedCredits += 5; cache.wallets[address].tokens = tokens; }
+        else { attempts++; tokens = await cielo(`/${address}/pnl/tokens`, "?timeframe=30d&chain=solana"); requests++; estimatedCredits += 5; cache.wallets[address].tokens = tokens; }
         summary = { ...summary, ...summarizeTokens(tokens) };
       } else tokenPnlSkipped++;
       const decision = validate(c, summary), external = { provider: "cielo", timeframe: "30d", checkedAt: new Date().toISOString(), ...summary, ...decision };
       validations.push({ address, ...external });
-      const r = cp?.results?.[address]; if (r) { r.externalValidation = external; if (decision.status === "REJECT" || decision.status === "SIGNAL_ONLY") r.verdict = { status: decision.status, stage: "cielo_external_validation", reasons: [...(r.verdict?.reasons || []), ...decision.reasons] }; }
-    } catch (e) { validations.push({ address, provider: "cielo", timeframe: "30d", status: "UNKNOWN", reasons: ["cielo_request_error"], error: String(e).slice(0, 220) }); }
+      const r = cp?.results?.[address]; if (r) { r.externalValidation = external; if (decision.status === "REJECT" || decision.status === "SIGNAL_ONLY") r.verdict = { status: decision.status, stage: "cielo_external_validation", reasons: [...new Set([...(r.verdict?.reasons || []), ...decision.reasons])] }; }
+    } catch (e) {
+      if (e instanceof CieloPlanRestrictedError) planRestricted = true;
+      validations.push({ address, provider: "cielo", timeframe: "30d", status: "UNKNOWN", reasons: [e instanceof CieloPlanRestrictedError ? "cielo_plan_restricted" : "cielo_request_error"], error: String(e).slice(0, 220) });
+    }
   }
+
   await atomicSave(CACHE_PATH, cache);
   const current = Object.values(cp?.results || {}) as any[], counts = current.reduce((a: any, x: any) => { const s = x?.verdict?.status || "UNKNOWN"; a[s] = (a[s] || 0) + 1; return a; }, {});
   const stillDeep = current.filter(x => x?.verdict?.status === "DEEP_DIVE").sort((a, b) => (b?.replay?.twoPerDay?.stress50NetSol || -999) - (a?.replay?.twoPerDay?.stress50NetSol || -999));
-  report.cieloValidation = { startedAt, finishedAt: new Date().toISOString(), candidatesChecked: validations.length, requests, cacheHits, estimatedCredits, tokenPnlSkipped, validations };
-  report.deepDive = stillDeep.slice(0, 25); report.counts = counts; report.note = `${report.note || ""} Cielo 30D external validation is mandatory for DEEP_DIVE; trading-stats is cached and token PnL is fetched only for candidates that survive the behavioral gate.`.trim(); cp.updatedAt = new Date().toISOString();
+  report.cieloValidation = { startedAt, finishedAt: new Date().toISOString(), enabled: CIELO_ENABLED, candidatesChecked: validations.length, requests, attempts, cacheHits, estimatedCredits, tokenPnlSkipped, planRestricted, validations };
+  report.deepDive = stillDeep.slice(0, 25); report.counts = counts;
+  report.note = `${report.note || ""} External validation is fail-closed: known external rejects are always enforced; Cielo API validation runs only when enabled and plan-supported, with cached trading stats and token PnL fetched only for behavioral survivors.`.trim();
+  cp.updatedAt = new Date().toISOString();
   await atomicSave(CHECKPOINT_PATH, cp); await atomicSave(REPORT_PATH, report);
-  console.log(JSON.stringify({ event: "shark_scout_cielo_validation_complete", startedAt, finishedAt: new Date().toISOString(), candidatesChecked: validations.length, requests, cacheHits, estimatedCredits, tokenPnlSkipped, counts, validations: validations.map(v => ({ address: v.address, status: v.status, medianHoldSeconds: v.medianHoldSeconds, winRate: v.winRate, tokensTraded: v.tokensTraded, realizedPnl: v.realizedPnl, realizedRoi: v.realizedRoi, largestWinnerShare: v.largestWinnerShare, reasons: v.reasons, error: v.error })) }));
+  console.log(JSON.stringify({ event: "shark_scout_cielo_validation_complete", startedAt, finishedAt: new Date().toISOString(), enabled: CIELO_ENABLED, candidatesChecked: validations.length, requests, attempts, cacheHits, estimatedCredits, tokenPnlSkipped, planRestricted, counts, validations: validations.map(v => ({ address: v.address, status: v.status, medianHoldSeconds: v.medianHoldSeconds, winRate: v.winRate, tokensTraded: v.tokensTraded, realizedPnl: v.realizedPnl, realizedRoi: v.realizedRoi, largestWinnerShare: v.largestWinnerShare, reasons: v.reasons, error: v.error })) }));
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) runCieloValidation().catch(e => { console.error(JSON.stringify({ event: "shark_scout_cielo_validation_failed", error: e instanceof Error ? e.message : String(e) })); process.exitCode = 0; });
