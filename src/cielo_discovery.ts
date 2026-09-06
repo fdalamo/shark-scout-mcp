@@ -2,6 +2,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 
 const KEY = process.env.CIELO_API_KEY?.trim();
+const ENABLED = String(process.env.CIELO_DISCOVERY_ENABLED || "false").toLowerCase() === "true";
 const BASE = "https://feed-api.cielo.finance/api/v1";
 const CACHE_PATH = process.env.SCOUT_CIELO_DISCOVERY_CACHE_PATH || "/data/cielo-discovery-cache.json";
 const TIMEOUT_MS = clamp(Number(process.env.REQUEST_TIMEOUT_MS || 25000), 3000, 60000);
@@ -15,7 +16,7 @@ export type CieloDiscoveryResult = {
   leads: CieloLead[];
   tokens: string[];
   errors: string[];
-  telemetry: { requests: number; cacheHits: number; estimatedCredits: number; freshSources: string[]; leadCount: number; tokenCount: number };
+  telemetry: { enabled: boolean; requests: number; attempts: number; cacheHits: number; estimatedCredits: number; freshSources: string[]; leadCount: number; tokenCount: number };
 };
 
 type CacheEntry = { fetchedAt: string; value: any };
@@ -33,32 +34,23 @@ async function get(pathname: string, q: URLSearchParams) { if (!KEY) throw new E
 
 export async function cieloDiscovery(): Promise<CieloDiscoveryResult> {
   const errors: string[] = [], leads = new Map<string, CieloLead>(), tokens: string[] = [], cache = await readCache();
-  let requests = 0, cacheHits = 0, estimatedCredits = 0; const freshSources: string[] = [];
-  if (!KEY) return { leads: [], tokens: [], errors: ["CIELO_API_KEY_missing"], telemetry: { requests, cacheHits, estimatedCredits, freshSources, leadCount: 0, tokenCount: 0 } };
+  let requests = 0, attempts = 0, cacheHits = 0, estimatedCredits = 0; const freshSources: string[] = [];
+  const empty = (): CieloDiscoveryResult => ({ leads: [], tokens: [], errors, telemetry: { enabled: ENABLED, requests, attempts, cacheHits, estimatedCredits, freshSources, leadCount: 0, tokenCount: 0 } });
+  if (!ENABLED) { const out = empty(); console.log(JSON.stringify({ event: "shark_scout_cielo_discovery_skipped", reason: "disabled_for_current_plan", ...out.telemetry })); return out; }
+  if (!KEY) { errors.push("CIELO_API_KEY_missing"); return empty(); }
 
   const cached = async (key: string, ttlMs: number, credits: number, fn: () => Promise<any>) => {
     const e = cache.entries[key], age = e ? Date.now() - Date.parse(e.fetchedAt) : Infinity;
     if (e && Number.isFinite(age) && age < ttlMs) { cacheHits++; return e.value; }
+    attempts++;
     try { const value = await fn(); requests++; estimatedCredits += credits; freshSources.push(key); cache.entries[key] = { fetchedAt: new Date().toISOString(), value }; return value; }
     catch (err) { errors.push(`${key}:${String(err)}`); return e?.value ?? null; }
   };
 
   const addLead = (a: string, tag: string, row: any) => { const e = leads.get(a) || { address: a, tags: [], lanes: [], tokens: [] }; e.tags = uniq([...e.tags, tag]); e.lanes = uniq([...e.lanes, "CIELO_TAG"]); const label = row?.label || row?.wallet_label || row?.name; if (label) e.label = String(label); leads.set(a, e); };
-
-  for (const tag of TAGS) {
-    const q = new URLSearchParams({ wallet_type: "solana", limit: "50" }); q.append("tags", tag);
-    const body = await cached(`tag:${tag}`, TAG_TTL_MS, 10, () => get("/tags/wallets", q));
-    for (const row of deep(body)) { const a = walletOf(row); if (a) addLead(a, tag, row); }
-  }
-
-  for (const [interval, ttl] of [["1h", TREND_1H_TTL_MS], ["24h", TREND_24H_TTL_MS]] as const) {
-    const q = new URLSearchParams({ chain: "solana", interval, limit: "20" });
-    const body = await cached(`trend:${interval}`, ttl, 20, () => get("/trending-tokens", q));
-    for (const row of deep(body)) { const a = tokenOf(row); if (a) tokens.push(a); }
-  }
-
+  for (const tag of TAGS) { const q = new URLSearchParams({ wallet_type: "solana", limit: "50" }); q.append("tags", tag); const body = await cached(`tag:${tag}`, TAG_TTL_MS, 10, () => get("/tags/wallets", q)); for (const row of deep(body)) { const a = walletOf(row); if (a) addLead(a, tag, row); } }
+  for (const [interval, ttl] of [["1h", TREND_1H_TTL_MS], ["24h", TREND_24H_TTL_MS]] as const) { const q = new URLSearchParams({ chain: "solana", interval, limit: "20" }); const body = await cached(`trend:${interval}`, ttl, 20, () => get("/trending-tokens", q)); for (const row of deep(body)) { const a = tokenOf(row); if (a) tokens.push(a); } }
   await writeCache(cache);
-  const out = { leads: [...leads.values()], tokens: uniq(tokens), errors, telemetry: { requests, cacheHits, estimatedCredits, freshSources, leadCount: leads.size, tokenCount: uniq(tokens).length } };
-  console.log(JSON.stringify({ event: "shark_scout_cielo_discovery_complete", ...out.telemetry, errors }));
-  return out;
+  const out: CieloDiscoveryResult = { leads: [...leads.values()], tokens: uniq(tokens), errors, telemetry: { enabled: ENABLED, requests, attempts, cacheHits, estimatedCredits, freshSources, leadCount: leads.size, tokenCount: uniq(tokens).length } };
+  console.log(JSON.stringify({ event: "shark_scout_cielo_discovery_complete", ...out.telemetry, errors })); return out;
 }
