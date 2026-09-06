@@ -1,6 +1,6 @@
 {
   "name": "shark-scout-mcp",
-  "version": "0.20.0",
+  "version": "0.21.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -9,10 +9,11 @@
     "start": "node dist/browser.js",
     "maintenance": "node dist/maintenance.js",
     "odin-sync": "node dist/odin_sync.js",
+    "portfolio-audit": "node dist/portfolio_audit.js",
     "dune-discovery": "node dist/dune_discovery.js",
     "dune-alpha": "node dist/dune_alpha_runner.js",
-    "harvest": "node dist/maintenance.js && node dist/odin_sync.js && node dist/dune_alpha_runner.js && node dist/harvest_scout.js && node dist/gauntlet_v6.js && node dist/cielo_validate.js",
-    "gauntlet": "node dist/maintenance.js && node dist/odin_sync.js && node dist/gauntlet_v6.js && node dist/cielo_validate.js"
+    "harvest": "node dist/maintenance.js && node dist/odin_sync.js && node dist/portfolio_audit.js && node dist/dune_alpha_runner.js && node dist/harvest_scout.js && node dist/gauntlet_v6.js && node dist/cielo_validate.js",
+    "gauntlet": "node dist/maintenance.js && node dist/odin_sync.js && node dist/portfolio_audit.js && node dist/gauntlet_v6.js && node dist/cielo_validate.js"
   },
   "engines": {
     "node": ">=20"
