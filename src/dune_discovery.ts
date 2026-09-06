@@ -103,10 +103,11 @@ export async function runDuneDiscoveryStage(stateOverride?: AnyObj) {
 
       const body = await duneResult(queryId, RESULT_LIMIT); telemetry.fullFetches++;
       const rows = rowsOf(body); telemetry.rowsFetched += rows.length;
+      let queryWalletRows = 0;
       for (const row of rows) {
         const wallet = extractWallet(row);
         if (!wallet) { telemetry.unmappedRows++; continue; }
-        telemetry.walletRows++;
+        queryWalletRows++; telemetry.walletRows++;
         const outcome = upsert(state, wallet, queryId, row, executionId);
         if (outcome === "new") telemetry.newWallets++;
         else if (outcome === "known_rejected") telemetry.knownRejected++;
@@ -115,7 +116,7 @@ export async function runDuneDiscoveryStage(stateOverride?: AnyObj) {
       ce.lastExecutionId = executionId;
       ce.lastExecutionEndedAt = body?.execution_ended_at || body?.submitted_at || null;
       ce.lastRowCount = Number(body?.result?.metadata?.total_row_count ?? body?.result?.metadata?.row_count ?? rows.length);
-      ce.lastCandidates = rows.length - telemetry.unmappedRows;
+      ce.lastCandidates = queryWalletRows;
       cache.queries[key] = ce;
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
