@@ -91,7 +91,7 @@ function fifoSell(book: TokenBook, qty: number, proceedsSol: number) {
 }
 
 async function reconstructHistory(current: Map<string, number>) {
-  const sigRows = await rpc("getSignaturesForAddress", [WALLET, { limit: SIG_LIMIT }, "confirmed"]);
+  const sigRows = await rpc("getSignaturesForAddress", [WALLET, { limit: SIG_LIMIT, commitment: "confirmed" }]);
   const txs: AnyObj[] = [];
   for (const s of (sigRows || []).slice().reverse()) {
     try {
@@ -135,7 +135,6 @@ async function reconstructHistory(current: Map<string, number>) {
     }
   }
 
-  // If current quantity exceeds reconstructed lots, keep the known basis but mark incomplete.
   for (const [mint, qty] of current) {
     const b = ensureBook(books, mint);
     const lotQty = b.lots.reduce((s, l) => s + l.qty, 0);
