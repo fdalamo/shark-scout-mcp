@@ -4,6 +4,7 @@ import path from "node:path";
 const CP_PATH = process.env.SCOUT_GAUNTLET_STATE_PATH || "/data/gauntlet-state.json";
 const STATE_PATH = process.env.SCOUT_STATE_PATH || "/data/shark-state.json";
 const PORTFOLIO_PATH = process.env.SCOUT_PORTFOLIO_PATH || "/data/portfolio-audit.json";
+const OPPORTUNITY_PATH = process.env.SCOUT_OPPORTUNITY_PATH || "/data/mirror-opportunity-audit.json";
 const OUT_PATH = process.env.SCOUT_ENGINE_INTELLIGENCE_PATH || "/data/engine-intelligence.json";
 const LEDGER_PATH = process.env.SCOUT_LIVE_LEDGER_PATH || "/data/live-trade-ledger.json";
 const MAX_CANDIDATES = clamp(Number(process.env.ENGINE_INTELLIGENCE_TOP || 25), 5, 100);
@@ -46,13 +47,14 @@ function sampleQuality(r:any, stateWallet:any){
   const closed=Number(r?.hold?.closedHolds||0),buys=Number(r?.hold?.buyEvents||0),parsed=Number(r?.hold?.parsedSwaps||0);
   const partial=Boolean(r?.heliusCoveragePartial),disc=Number(r?.discoveryTokens||stateWallet?.tokens?.length||0);
   const coverageRatio=buys>0?Math.min(1,closed/buys):null;
-  let risk:"LOW"|"MEDIUM"|"HIGH"="LOW";
+  let riskScore=0;
   const reasons:string[]=[];
-  if(partial){risk="HIGH";reasons.push("helius_history_partial");}
-  if(closed<10){risk="HIGH";reasons.push("closed_sample_lt_10");}
-  else if(closed<20&&risk!=="HIGH"){risk="MEDIUM";reasons.push("closed_sample_lt_20");}
-  if(disc<2&&risk==="LOW"){risk="MEDIUM";reasons.push("single_discovery_context");}
-  if(coverageRatio!=null&&coverageRatio<.35){risk="HIGH";reasons.push("low_close_to_buy_coverage");}
+  if(partial){riskScore=Math.max(riskScore,2);reasons.push("helius_history_partial");}
+  if(closed<10){riskScore=Math.max(riskScore,2);reasons.push("closed_sample_lt_10");}
+  else if(closed<20){riskScore=Math.max(riskScore,1);reasons.push("closed_sample_lt_20");}
+  if(disc<2){riskScore=Math.max(riskScore,1);reasons.push("single_discovery_context");}
+  if(coverageRatio!=null&&coverageRatio<.35){riskScore=Math.max(riskScore,2);reasons.push("low_close_to_buy_coverage");}
+  const risk:"LOW"|"MEDIUM"|"HIGH"=riskScore>=2?"HIGH":riskScore===1?"MEDIUM":"LOW";
   return{risk,reasons,closedHolds:closed,buyEvents:buys,parsedSwaps:parsed,discoveryTokens:disc,coverageRatio};
 }
 
@@ -91,10 +93,24 @@ function updateLedger(previous:any, portfolio:any){
   return ledger;
 }
 
+function summarizeLiveOpportunity(opportunity:any){
+  if(!opportunity||opportunity?.event!=="shark_scout_opportunity_audit_complete") return {available:false};
+  return {
+    available:true,
+    totalOpportunities:num(opportunity?.totalOpportunities),
+    copied:num(opportunity?.copied),
+    copiedOpportunityRate:num(opportunity?.eligibleOpportunityRate),
+    counterfactualWouldHaveWon:num(opportunity?.counterfactualWouldHaveWon),
+    counterfactualWouldHaveLost:num(opportunity?.counterfactualWouldHaveLost),
+    reasonAttribution:"UNKNOWN_WITHOUT_ODIN_TRADE_HISTORY",
+    errors:Array.isArray(opportunity?.errors)?opportunity.errors:[],
+  };
+}
+
 async function main(){
   const startedAt=now();
-  const [cp,state,portfolio,prevLedger]=await Promise.all([
-    readJson(CP_PATH,{results:{}}),readJson(STATE_PATH,{wallets:{}}),readJson(PORTFOLIO_PATH,null),readJson(LEDGER_PATH,null)
+  const [cp,state,portfolio,opportunity,prevLedger]=await Promise.all([
+    readJson(CP_PATH,{results:{}}),readJson(STATE_PATH,{wallets:{}}),readJson(PORTFOLIO_PATH,null),readJson(OPPORTUNITY_PATH,null),readJson(LEDGER_PATH,null)
   ]);
   const finalStatus:Record<string,string>={};
   for(const [a,w] of Object.entries(state?.wallets||{}))finalStatus[a]=String((w as AnyObj)?.status||"");
@@ -110,7 +126,7 @@ async function main(){
   const actionable=ranked.filter(x=>!x.hardReject&&x.sampleQuality.risk!=="HIGH"&&Number(x.medianHoldHours||0)>=1&&Number(x.replay.trades||0)>=10&&Number(x.replay.netSol||0)>0&&Number(x.replay.stress50NetSol||-999)>0).slice(0,MAX_CANDIDATES);
   const ledger=updateLedger(prevLedger,portfolio);
   await atomicSave(LEDGER_PATH,ledger);
-  const out={schemaVersion:1,event:"shark_scout_engine_intelligence_complete",startedAt,finishedAt:now(),walletsScored:ranked.length,actionableCount:actionable.length,topActionable:actionable.slice(0,10),topOverall:ranked.slice(0,10),portfolioAvailable:Boolean(portfolio),liveLedgerEvents:ledger.events.slice(-20),notes:["Follower replay uses existing 0.075 SOL fee-aware gauntlet round trips.","Sample quality penalizes partial or thin historical reconstruction.","Scores are prioritization signals, not automatic mirror promotions."]};
+  const out={schemaVersion:2,event:"shark_scout_engine_intelligence_complete",startedAt,finishedAt:now(),walletsScored:ranked.length,actionableCount:actionable.length,topActionable:actionable.slice(0,10),topOverall:ranked.slice(0,10),portfolioAvailable:Boolean(portfolio),liveOpportunity:summarizeLiveOpportunity(opportunity),liveLedgerEvents:ledger.events.slice(-20),notes:["Follower replay uses existing 0.075 SOL fee-aware gauntlet round trips.","Sample quality penalizes partial or thin historical reconstruction.","Opportunity audit never invents an Odin skip reason; reason attribution remains UNKNOWN without trade-history data.","Scores are prioritization signals, not automatic mirror promotions."]};
   await atomicSave(OUT_PATH,out);
   console.log(JSON.stringify(out));
 }
