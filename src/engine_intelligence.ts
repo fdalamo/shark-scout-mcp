@@ -26,7 +26,7 @@ function replayMetrics(r:any){
   const rois=trips.map((x:any)=>num(x?.followerRoi)).filter((x:any):x is number=>x!=null);
   const stress50=trips.map((x:any)=>num(x?.stress50NetSol)).filter((x:any):x is number=>x!=null);
   const stress75=trips.map((x:any)=>num(x?.stress75NetSol)).filter((x:any):x is number=>x!=null);
-  const winners=nets.filter(x=>x>0),losers=nets.filter(x=>x<0);
+  const winners=nets.filter((x:number)=>x>0),losers=nets.filter((x:number)=>x<0);
   const largestWinner=winners.length?Math.max(...winners):0;
   const grossWin=sum(winners),grossLoss=Math.abs(sum(losers));
   const net=sum(nets);
