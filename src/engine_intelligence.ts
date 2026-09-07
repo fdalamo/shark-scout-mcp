@@ -1,16 +1,13 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
-
-const CP_PATH = process.env.SCOUT_GAUNTLET_STATE_PATH || "/data/gauntlet-state.json";
-const STATE_PATH = process.env.SCOUT_STATE_PATH || "/data/shark-state.json";
-const PORTFOLIO_PATH = process.env.SCOUT_PORTFOLIO_PATH || "/data/portfolio-audit.json";
-const OPPORTUNITY_PATH = process.env.SCOUT_OPPORTUNITY_PATH || "/data/mirror-opportunity-audit.json";
-const OUT_PATH = process.env.SCOUT_ENGINE_INTELLIGENCE_PATH || "/data/engine-intelligence.json";
-const LEDGER_PATH = process.env.SCOUT_LIVE_LEDGER_PATH || "/data/live-trade-ledger.json";
-const MAX_CANDIDATES = clamp(Number(process.env.ENGINE_INTELLIGENCE_TOP || 25), 5, 100);
-
-type AnyObj = Record<string, any>;
-
+const CP_PATH=process.env.SCOUT_GAUNTLET_STATE_PATH||"/data/gauntlet-state.json";
+const STATE_PATH=process.env.SCOUT_STATE_PATH||"/data/shark-state.json";
+const PORTFOLIO_PATH=process.env.SCOUT_PORTFOLIO_PATH||"/data/portfolio-audit.json";
+const OPPORTUNITY_PATH=process.env.SCOUT_OPPORTUNITY_PATH||"/data/mirror-opportunity-audit.json";
+const OUT_PATH=process.env.SCOUT_ENGINE_INTELLIGENCE_PATH||"/data/engine-intelligence.json";
+const LEDGER_PATH=process.env.SCOUT_LIVE_LEDGER_PATH||"/data/live-trade-ledger.json";
+const MAX_CANDIDATES=clamp(Number(process.env.ENGINE_INTELLIGENCE_TOP||25),5,100);
+type AnyObj=Record<string,any>;
 function clamp(n:number,min:number,max:number){return Math.max(min,Math.min(max,Number.isFinite(n)?Math.floor(n):min));}
 function now(){return new Date().toISOString();}
 function num(v:any):number|null{const n=Number(v);return Number.isFinite(n)?n:null;}
@@ -19,116 +16,11 @@ function quantile(xs:number[],p:number){if(!xs.length)return null;const a=[...xs
 function sum(xs:number[]){return xs.reduce((a,b)=>a+b,0);}
 async function readJson(file:string,fallback:any){try{return JSON.parse(await fs.readFile(file,"utf8"));}catch{return fallback;}}
 async function atomicSave(file:string,data:any){await fs.mkdir(path.dirname(file),{recursive:true});const tmp=`${file}.${process.pid}.tmp`;await fs.writeFile(tmp,JSON.stringify(data));await fs.rename(tmp,file);}
-
-function replayMetrics(r:any){
-  const trips=Array.isArray(r?.hold?.roundTrips)?r.hold.roundTrips:[];
-  const nets=trips.map((x:any)=>num(x?.followerNetSol)).filter((x:any):x is number=>x!=null);
-  const rois=trips.map((x:any)=>num(x?.followerRoi)).filter((x:any):x is number=>x!=null);
-  const stress50=trips.map((x:any)=>num(x?.stress50NetSol)).filter((x:any):x is number=>x!=null);
-  const stress75=trips.map((x:any)=>num(x?.stress75NetSol)).filter((x:any):x is number=>x!=null);
-  const winners=nets.filter((x:number)=>x>0),losers=nets.filter((x:number)=>x<0);
-  const largestWinner=winners.length?Math.max(...winners):0;
-  const grossWin=sum(winners),grossLoss=Math.abs(sum(losers));
-  const net=sum(nets);
-  return {
-    trades:nets.length,
-    netSol:nets.length?net:null,
-    winRate:nets.length?winners.length/nets.length:null,
-    medianRoi:median(rois),
-    p25Roi:quantile(rois,.25),
-    profitFactor:grossLoss>0?grossWin/grossLoss:(grossWin>0?999:null),
-    largestWinnerShare:grossWin>0?largestWinner/grossWin:null,
-    stress50NetSol:stress50.length?sum(stress50):null,
-    stress75NetSol:stress75.length?sum(stress75):null,
-  };
-}
-
-function sampleQuality(r:any, stateWallet:any){
-  const closed=Number(r?.hold?.closedHolds||0),buys=Number(r?.hold?.buyEvents||0),parsed=Number(r?.hold?.parsedSwaps||0);
-  const partial=Boolean(r?.heliusCoveragePartial),disc=Number(r?.discoveryTokens||stateWallet?.tokens?.length||0);
-  const coverageRatio=buys>0?Math.min(1,closed/buys):null;
-  let riskScore=0;
-  const reasons:string[]=[];
-  if(partial){riskScore=Math.max(riskScore,2);reasons.push("helius_history_partial");}
-  if(closed<10){riskScore=Math.max(riskScore,2);reasons.push("closed_sample_lt_10");}
-  else if(closed<20){riskScore=Math.max(riskScore,1);reasons.push("closed_sample_lt_20");}
-  if(disc<2){riskScore=Math.max(riskScore,1);reasons.push("single_discovery_context");}
-  if(coverageRatio!=null&&coverageRatio<.35){riskScore=Math.max(riskScore,2);reasons.push("low_close_to_buy_coverage");}
-  const risk:"LOW"|"MEDIUM"|"HIGH"=riskScore>=2?"HIGH":riskScore===1?"MEDIUM":"LOW";
-  return{risk,reasons,closedHolds:closed,buyEvents:buys,parsedSwaps:parsed,discoveryTokens:disc,coverageRatio};
-}
-
-function copyabilityScores(r:any,m:any,q:any){
-  const med=num(r?.hold?.medianHoldSeconds)||0,fast=Number(r?.hold?.fastUnder10m||0),closed=Math.max(1,Number(r?.hold?.closedHolds||0));
-  const slow6=Number(r?.hold?.slowOver6h||0),ideal12=Number(r?.hold?.idealOver12h||0);
-  const fastShare=fast/closed,slowShare=slow6/closed,idealShare=ideal12/closed;
-  const timing=Math.max(0,Math.min(100,20*Math.min(1,med/3600)+35*slowShare+35*idealShare-50*fastShare+10));
-  let replay=0;
-  if(m.netSol!=null)replay+=m.netSol>0?30:0;
-  if(m.stress50NetSol!=null)replay+=m.stress50NetSol>0?20:0;
-  if(m.profitFactor!=null)replay+=Math.min(20,10*Math.max(0,m.profitFactor-1));
-  if(m.largestWinnerShare!=null)replay+=20*Math.max(0,1-m.largestWinnerShare);
-  if(m.trades>=15)replay+=10;
-  const quality=q.risk==="LOW"?100:q.risk==="MEDIUM"?65:25;
-  const overall=.4*timing+.4*Math.min(100,replay)+.2*quality;
-  return{historicalEntryToleranceScore:Math.round(timing),historicalFollowerReplayScore:Math.round(Math.min(100,replay)),sampleQualityScore:quality,overallCopyabilityScore:Math.round(overall)};
-}
-
-function updateLedger(previous:any, portfolio:any){
-  const ledger=previous&&typeof previous==="object"?previous:{schemaVersion:2,createdAt:now(),events:[],positions:{}};
-  ledger.schemaVersion=2; ledger.updatedAt=now(); ledger.positions=ledger.positions||{}; ledger.events=Array.isArray(ledger.events)?ledger.events:[];
-  const current=new Map<string,AnyObj>();
-  for(const p of portfolio?.positions||[])if(p?.mint)current.set(String(p.mint),p);
-  const prevPos=ledger.positions as Record<string,AnyObj>;
-  const seen=new Set<string>([...Object.keys(prevPos),...current.keys()]);
-  for(const mint of seen){
-    const before=prevPos[mint],after=current.get(mint);
-    const bq=num(before?.quantity)||0,aq=num(after?.quantity)||0,d=aq-bq;
-    if(!before&&after)ledger.events.push({at:portfolio?.finishedAt||now(),type:"POSITION_OPENED",mint,symbol:after.symbol,quantity:aq});
-    else if(before&&!after)ledger.events.push({at:portfolio?.finishedAt||now(),type:"POSITION_CLOSED",mint,symbol:before.symbol,quantityBefore:bq,lastKnownTotalPnlSol:before.totalPnlSol??null});
-    else if(Math.abs(d)>Math.max(1e-9,Math.max(aq,bq)*.0001))ledger.events.push({at:portfolio?.finishedAt||now(),type:d>0?"POSITION_INCREASED":"POSITION_REDUCED",mint,symbol:after?.symbol||before?.symbol,quantityDelta:d,quantityAfter:aq,totalPnlSol:after?.totalPnlSol??null});
-  }
-  ledger.positions=Object.fromEntries([...current.entries()].map(([k,v])=>[k,v]));
-  ledger.events=ledger.events.slice(-500);
-  return ledger;
-}
-
-function summarizeLiveOpportunity(opportunity:any){
-  if(!opportunity||opportunity?.event!=="shark_scout_opportunity_audit_complete") return {available:false};
-  return {
-    available:true,
-    totalOpportunities:num(opportunity?.totalOpportunities),
-    copied:num(opportunity?.copied),
-    copiedOpportunityRate:num(opportunity?.eligibleOpportunityRate),
-    counterfactualWouldHaveWon:num(opportunity?.counterfactualWouldHaveWon),
-    counterfactualWouldHaveLost:num(opportunity?.counterfactualWouldHaveLost),
-    reasonAttribution:"UNKNOWN_WITHOUT_ODIN_TRADE_HISTORY",
-    errors:Array.isArray(opportunity?.errors)?opportunity.errors:[],
-  };
-}
-
-async function main(){
-  const startedAt=now();
-  const [cp,state,portfolio,opportunity,prevLedger]=await Promise.all([
-    readJson(CP_PATH,{results:{}}),readJson(STATE_PATH,{wallets:{}}),readJson(PORTFOLIO_PATH,null),readJson(OPPORTUNITY_PATH,null),readJson(LEDGER_PATH,null)
-  ]);
-  const finalStatus:Record<string,string>={};
-  for(const [a,w] of Object.entries(state?.wallets||{}))finalStatus[a]=String((w as AnyObj)?.status||"");
-  const ranked:any[]=[];
-  for(const [address,r0] of Object.entries(cp?.results||{})){
-    const r=r0 as AnyObj,w=state?.wallets?.[address]||{};
-    const replay=replayMetrics(r),quality=sampleQuality(r,w),scores=copyabilityScores(r,replay,quality);
-    const med=num(r?.hold?.medianHoldSeconds);
-    const hardReject=med!=null&&med<600;
-    ranked.push({address,finalStatus:finalStatus[address]||null,medianHoldHours:med!=null?med/3600:null,replay,sampleQuality:quality,scores,hardReject,providers:r?.providers||w?.providers||[],lanes:w?.lanes||[],evaluatedAt:r?.evaluatedAt||null});
-  }
-  ranked.sort((a,b)=>b.scores.overallCopyabilityScore-a.scores.overallCopyabilityScore||Number(b.replay.netSol||-999)-Number(a.replay.netSol||-999));
-  const actionable=ranked.filter(x=>!x.hardReject&&x.sampleQuality.risk!=="HIGH"&&Number(x.medianHoldHours||0)>=1&&Number(x.replay.trades||0)>=10&&Number(x.replay.netSol||0)>0&&Number(x.replay.stress50NetSol||-999)>0).slice(0,MAX_CANDIDATES);
-  const ledger=updateLedger(prevLedger,portfolio);
-  await atomicSave(LEDGER_PATH,ledger);
-  const out={schemaVersion:2,event:"shark_scout_engine_intelligence_complete",startedAt,finishedAt:now(),walletsScored:ranked.length,actionableCount:actionable.length,topActionable:actionable.slice(0,10),topOverall:ranked.slice(0,10),portfolioAvailable:Boolean(portfolio),liveOpportunity:summarizeLiveOpportunity(opportunity),liveLedgerEvents:ledger.events.slice(-20),notes:["Follower replay uses existing 0.075 SOL fee-aware gauntlet round trips.","Sample quality penalizes partial or thin historical reconstruction.","Opportunity audit never invents an Odin skip reason; reason attribution remains UNKNOWN without trade-history data.","Scores are prioritization signals, not automatic mirror promotions."]};
-  await atomicSave(OUT_PATH,out);
-  console.log(JSON.stringify(out));
-}
-
+function tripMetrics(trips:any[],source:string){const nets=trips.map((x:any)=>num(x?.followerNetSol)).filter((x:any):x is number=>x!=null),rois=trips.map((x:any)=>num(x?.followerRoi)).filter((x:any):x is number=>x!=null),s50=trips.map((x:any)=>num(x?.stress50NetSol)).filter((x:any):x is number=>x!=null),s75=trips.map((x:any)=>num(x?.stress75NetSol)).filter((x:any):x is number=>x!=null),wins=nets.filter(x=>x>0),losses=nets.filter(x=>x<0),gw=sum(wins),gl=Math.abs(sum(losses)),largest=wins.length?Math.max(...wins):0;return{trades:nets.length,netSol:nets.length?sum(nets):null,winRate:nets.length?wins.length/nets.length:null,medianRoi:median(rois),p25Roi:quantile(rois,.25),profitFactor:gl>0?gw/gl:(gw>0?999:null),largestWinnerShare:gw>0?largest/gw:null,stress50NetSol:s50.length?sum(s50):null,stress75NetSol:s75.length?sum(s75):null,source};}
+function replayMetrics(r:any){const canonical=Array.isArray(r?.canonicalReplay?.roundTrips)?r.canonicalReplay.roundTrips:[];if(canonical.length)return tripMetrics(canonical,"replay_core_v1");const ht=num(r?.hold?.estimatedFollowerTrades),hn=num(r?.hold?.estimatedFollowerNetSol),hw=num(r?.hold?.estimatedFollowerWinRate),hm=num(r?.hold?.estimatedFollowerMedianRoi),hs=num(r?.hold?.stress50NetSol),h75=num(r?.hold?.stress75NetSol);if(ht!=null&&ht>0)return{trades:ht,netSol:hn,winRate:hw,medianRoi:hm,p25Roi:null,profitFactor:null,largestWinnerShare:num(r?.robustness?.largestWinnerShare),stress50NetSol:hs,stress75NetSol:h75,source:"gauntlet_hold_compact"};const cap=r?.replay?.twoPerDay;if(num(cap?.selected)!=null&&Number(cap.selected)>0)return{trades:Number(cap.selected),netSol:num(cap.netSol),winRate:num(cap.winRate),medianRoi:null,p25Roi:null,profitFactor:null,largestWinnerShare:num(r?.robustness?.largestWinnerShare),stress50NetSol:num(cap.stress50NetSol),stress75NetSol:num(cap.stress75NetSol),source:"gauntlet_two_per_day"};return tripMetrics(Array.isArray(r?.hold?.roundTrips)?r.hold.roundTrips:[],"legacy_roundtrips");}
+function sampleQuality(r:any,stateWallet:any){const closed=Number(r?.hold?.closedHolds||0),buys=Number(r?.hold?.buyEvents||0),parsed=Number(r?.hold?.parsedSwaps||0),partial=Boolean(r?.heliusCoveragePartial),disc=Number(r?.discoveryTokens||stateWallet?.tokens?.length||0),coverageRatio=buys>0?Math.min(1,closed/buys):null;let riskScore=0;const reasons:string[]=[];if(partial){riskScore=Math.max(riskScore,2);reasons.push("helius_history_partial");}if(closed<10){riskScore=Math.max(riskScore,2);reasons.push("closed_sample_lt_10");}else if(closed<20){riskScore=Math.max(riskScore,1);reasons.push("closed_sample_lt_20");}if(disc<2){riskScore=Math.max(riskScore,1);reasons.push("single_discovery_context");}if(coverageRatio!=null&&coverageRatio<.35){riskScore=Math.max(riskScore,2);reasons.push("low_close_to_buy_coverage");}return{risk:riskScore>=2?"HIGH":riskScore===1?"MEDIUM":"LOW",reasons,closedHolds:closed,buyEvents:buys,parsedSwaps:parsed,discoveryTokens:disc,coverageRatio};}
+function copyabilityScores(r:any,m:any,q:any){const med=num(r?.hold?.medianHoldSeconds)||0,fast=Number(r?.hold?.fastUnder10m||0),closed=Math.max(1,Number(r?.hold?.closedHolds||0)),slow6=Number(r?.hold?.slowOver6h||0),ideal12=Number(r?.hold?.idealOver12h||0),fastShare=fast/closed,slowShare=slow6/closed,idealShare=ideal12/closed,timing=Math.max(0,Math.min(100,20*Math.min(1,med/3600)+35*slowShare+35*idealShare-50*fastShare+10));let replay=0;if(m.netSol!=null)replay+=m.netSol>0?30:0;if(m.stress50NetSol!=null)replay+=m.stress50NetSol>0?20:0;if(m.profitFactor!=null)replay+=Math.min(20,10*Math.max(0,m.profitFactor-1));if(m.largestWinnerShare!=null)replay+=20*Math.max(0,1-m.largestWinnerShare);if(m.trades>=15)replay+=10;const quality=q.risk==="LOW"?100:q.risk==="MEDIUM"?65:25,overall=.4*timing+.4*Math.min(100,replay)+.2*quality;return{historicalEntryToleranceScore:Math.round(timing),historicalFollowerReplayScore:Math.round(Math.min(100,replay)),sampleQualityScore:quality,overallCopyabilityScore:Math.round(overall)};}
+function updateLedger(previous:any,portfolio:any){const ledger=previous&&typeof previous==="object"?previous:{schemaVersion:2,createdAt:now(),events:[],positions:{}};ledger.schemaVersion=2;ledger.updatedAt=now();ledger.positions=ledger.positions||{};ledger.events=Array.isArray(ledger.events)?ledger.events:[];const current=new Map<string,AnyObj>();for(const p of portfolio?.positions||[])if(p?.mint)current.set(String(p.mint),p);const prevPos=ledger.positions as Record<string,AnyObj>,seen=new Set<string>([...Object.keys(prevPos),...current.keys()]);for(const mint of seen){const before=prevPos[mint],after=current.get(mint),bq=num(before?.quantity)||0,aq=num(after?.quantity)||0,d=aq-bq;if(!before&&after)ledger.events.push({at:portfolio?.finishedAt||now(),type:"POSITION_OPENED",mint,symbol:after.symbol,quantity:aq});else if(before&&!after)ledger.events.push({at:portfolio?.finishedAt||now(),type:"POSITION_CLOSED",mint,symbol:before.symbol,quantityBefore:bq,lastKnownTotalPnlSol:before.totalPnlSol??null});else if(Math.abs(d)>Math.max(1e-9,Math.max(aq,bq)*.0001))ledger.events.push({at:portfolio?.finishedAt||now(),type:d>0?"POSITION_INCREASED":"POSITION_REDUCED",mint,symbol:after?.symbol||before?.symbol,quantityDelta:d,quantityAfter:aq,totalPnlSol:after?.totalPnlSol??null});}ledger.positions=Object.fromEntries([...current.entries()].map(([k,v])=>[k,v]));ledger.events=ledger.events.slice(-500);return ledger;}
+function summarizeLiveOpportunity(o:any){if(!o||o?.event!=="shark_scout_opportunity_audit_complete")return{available:false};return{available:true,totalOpportunities:num(o?.totalOpportunities),copied:num(o?.copied),copiedOpportunityRate:num(o?.eligibleOpportunityRate),counterfactualWouldHaveWon:num(o?.counterfactualWouldHaveWon),counterfactualWouldHaveLost:num(o?.counterfactualWouldHaveLost),reasonAttribution:"UNKNOWN_WITHOUT_ODIN_TRADE_HISTORY",errors:Array.isArray(o?.errors)?o.errors:[]};}
+async function main(){const startedAt=now(),[cp,state,portfolio,opportunity,prevLedger]=await Promise.all([readJson(CP_PATH,{results:{}}),readJson(STATE_PATH,{wallets:{}}),readJson(PORTFOLIO_PATH,null),readJson(OPPORTUNITY_PATH,null),readJson(LEDGER_PATH,null)]),finalStatus:Record<string,string>={};for(const [a,w] of Object.entries(state?.wallets||{}))finalStatus[a]=String((w as AnyObj)?.status||"");const ranked:any[]=[],replaySourceCounts:Record<string,number>={};for(const [address,r0] of Object.entries(cp?.results||{})){const r=r0 as AnyObj,w=state?.wallets?.[address]||{},replay=replayMetrics(r),quality=sampleQuality(r,w),scores=copyabilityScores(r,replay,quality),med=num(r?.hold?.medianHoldSeconds),hardReject=med!=null&&med<600;replaySourceCounts[replay.source]=(replaySourceCounts[replay.source]||0)+1;ranked.push({address,finalStatus:finalStatus[address]||null,gauntletVerdict:r?.verdict?.status||null,medianHoldHours:med!=null?med/3600:null,replay,sampleQuality:quality,scores,hardReject,providers:r?.providers||w?.providers||[],lanes:w?.lanes||[],evaluatedAt:r?.evaluatedAt||null});}ranked.sort((a,b)=>b.scores.overallCopyabilityScore-a.scores.overallCopyabilityScore||Number(b.replay.netSol||-999)-Number(a.replay.netSol||-999));const actionable=ranked.filter(x=>!x.hardReject&&x.sampleQuality.risk!=="HIGH"&&Number(x.medianHoldHours||0)>=1&&Number(x.replay.trades||0)>=10&&Number(x.replay.netSol||0)>0&&Number(x.replay.stress50NetSol||-999)>0).slice(0,MAX_CANDIDATES),ledger=updateLedger(prevLedger,portfolio);await atomicSave(LEDGER_PATH,ledger);const out={schemaVersion:3,event:"shark_scout_engine_intelligence_complete",startedAt,finishedAt:now(),walletsScored:ranked.length,replaySourceCounts,actionableCount:actionable.length,topActionable:actionable.slice(0,10),topOverall:ranked.slice(0,10),portfolioAvailable:Boolean(portfolio),liveOpportunity:summarizeLiveOpportunity(opportunity),liveLedgerEvents:ledger.events.slice(-20),notes:["Canonical Replay Core evidence is preferred when available; compact Gauntlet metrics are the fallback.","Actionable is a research ranking only and never auto-promotes or changes Odin.","Sample quality penalizes partial or thin historical reconstruction.","Opportunity audit never invents an Odin skip reason."]};await atomicSave(OUT_PATH,out);console.log(JSON.stringify(out));}
 main().catch(e=>{console.error(JSON.stringify({event:"shark_scout_engine_intelligence_failed",error:e instanceof Error?e.message:String(e)}));process.exitCode=1;});
