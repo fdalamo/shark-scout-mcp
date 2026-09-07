@@ -54,7 +54,8 @@ async function runStage(stage:Stage,timeoutMs:number):Promise<StageResult>{
       timedOut=true;
       log("shark_scout_stage_timeout",{stage:stage.name,phase:stage.phase,elapsedMs:Date.now()-started});
       child.kill("SIGTERM");
-      setTimeout(()=>{if(child.exitCode===null&&!child.killed)child.kill("SIGKILL");},5000).unref();
+      // child.killed only means a signal was sent; exitCode is the reliable liveness check.
+      setTimeout(()=>{if(child.exitCode===null)child.kill("SIGKILL");},5000).unref();
     },timeoutMs);
     child.on("error",()=>{
       clearTimeout(timer);
@@ -73,7 +74,18 @@ async function main(){
   const results:StageResult[]=[];
   let lastPhase:Phase|null=null;
   let canonicalSnapshotTaken=false;
-  log("shark_scout_pipeline_started",{version:2,stageCount:stages.length,budgetMs:PIPELINE_BUDGET_MS,finalizeReserveMs:FINALIZE_RESERVE_MS});
+  log("shark_scout_pipeline_started",{version:3,stageCount:stages.length,budgetMs:PIPELINE_BUDGET_MS,finalizeReserveMs:FINALIZE_RESERVE_MS});
+
+  const emergencyRestore=async(reason:string)=>{
+    if(!canonicalSnapshotTaken)return true;
+    log("shark_scout_emergency_restore_started",{reason});
+    // Canonical integrity outranks the global runtime budget: always allow a bounded restore attempt.
+    const restore=await runStage({name:"canonical_restore_emergency",phase:"FINALIZE",args:["dist/canonical_state_guard.js","restore"],timeoutMs:2*MINUTE},2*MINUTE);
+    results.push(restore);log("shark_scout_stage_finished",restore);
+    if(restore.status==="SUCCESS"){canonicalSnapshotTaken=false;return true;}
+    log("shark_scout_emergency_restore_failed",{reason,restore});
+    return false;
+  };
 
   for(const stage of stages){
     if(stage.phase!==lastPhase){lastPhase=stage.phase;log("shark_scout_phase_started",{phase:lastPhase,elapsedMs:Date.now()-pipelineStarted,remainingMs:deadline-Date.now()});}
@@ -103,17 +115,16 @@ async function main(){
     if(stage.name==="canonical_restore"&&result.status==="SUCCESS")canonicalSnapshotTaken=false;
 
     if(result.status!=="SUCCESS"&&!stage.continueOnFailure){
-      log("shark_scout_pipeline_aborted",{stage:stage.name,result,startedAt,canonicalSnapshotTaken});
+      const restored=await emergencyRestore(`critical_stage_${stage.name}_${result.status}`);
+      log("shark_scout_pipeline_aborted",{stage:stage.name,result,startedAt,canonicalSnapshotTaken,emergencyRestoreOk:restored});
       process.exitCode=1;return;
     }
   }
 
   // Safety invariant: never intentionally leave a canonical snapshot bracket unrestored.
   if(canonicalSnapshotTaken){
-    log("shark_scout_emergency_restore_started",{});
-    const restore=await runStage({name:"canonical_restore_emergency",phase:"FINALIZE",args:["dist/canonical_state_guard.js","restore"],timeoutMs:2*MINUTE},Math.min(2*MINUTE,Math.max(5_000,deadline-Date.now())));
-    results.push(restore);log("shark_scout_stage_finished",restore);
-    if(restore.status!=="SUCCESS")process.exitCode=1;
+    const restored=await emergencyRestore("pipeline_end_snapshot_open");
+    if(!restored)process.exitCode=1;
   }
 
   const failed=results.filter(x=>x.status==="FAILED"||x.status==="TIMED_OUT");
