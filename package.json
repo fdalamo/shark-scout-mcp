@@ -1,6 +1,6 @@
 {
   "name": "shark-scout-mcp",
-  "version": "0.27.0",
+  "version": "0.28.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -12,14 +12,15 @@
     "odin-sync": "node dist/odin_sync.js",
     "portfolio-audit": "node dist/portfolio_audit_v2.js",
     "opportunity-audit": "node dist/mirror_opportunity_audit.js",
+    "outcome-miner": "node dist/outcome_miner.js",
     "deep-dive": "node dist/deep_dive_reinvestigate.js",
     "replay-shadow": "node dist/replay_shadow.js",
     "evidence-funnel": "node dist/evidence_funnel.js",
     "engine-intelligence": "node dist/engine_intelligence.js",
     "dune-discovery": "node dist/dune_discovery.js",
     "dune-alpha": "node dist/dune_alpha_runner.js",
-    "harvest": "node dist/maintenance.js && node dist/odin_sync.js && node dist/portfolio_audit_v2.js && node dist/mirror_opportunity_audit.js && node dist/dune_alpha_runner.js && node dist/harvest_scout.js && node dist/deep_dive_reinvestigate.js && node dist/gauntlet_v6.js && node dist/replay_shadow.js && node dist/cielo_validate.js && node dist/evidence_funnel.js && node dist/engine_intelligence.js",
-    "gauntlet": "node dist/maintenance.js && node dist/odin_sync.js && node dist/portfolio_audit_v2.js && node dist/mirror_opportunity_audit.js && node dist/deep_dive_reinvestigate.js && node dist/gauntlet_v6.js && node dist/replay_shadow.js && node dist/cielo_validate.js && node dist/evidence_funnel.js && node dist/engine_intelligence.js"
+    "harvest": "node dist/maintenance.js && node dist/odin_sync.js && node dist/portfolio_audit_v2.js && node dist/mirror_opportunity_audit.js && node dist/dune_alpha_runner.js && node dist/outcome_miner.js && node dist/harvest_scout.js && node dist/deep_dive_reinvestigate.js && node dist/gauntlet_v6.js && node dist/replay_shadow.js && node dist/cielo_validate.js && node dist/evidence_funnel.js && node dist/engine_intelligence.js",
+    "gauntlet": "node dist/maintenance.js && node dist/odin_sync.js && node dist/portfolio_audit_v2.js && node dist/mirror_opportunity_audit.js && node dist/outcome_miner.js && node dist/deep_dive_reinvestigate.js && node dist/gauntlet_v6.js && node dist/replay_shadow.js && node dist/cielo_validate.js && node dist/evidence_funnel.js && node dist/engine_intelligence.js"
   },
   "engines": {"node": ">=20"},
   "dependencies": {"@modelcontextprotocol/sdk": "^1.17.5","@solana/web3.js": "^1.98.4","express": "^5.1.0","zod": "^3.25.76"},
