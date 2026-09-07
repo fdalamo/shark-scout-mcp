@@ -1,11 +1,12 @@
 {
   "name": "shark-scout-mcp",
-  "version": "0.26.0",
+  "version": "0.27.0",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/browser.ts",
     "build": "tsc -p tsconfig.json",
+    "test:replay": "node dist/replay_core_selftest.js",
     "start": "node dist/browser.js",
     "maintenance": "node dist/maintenance.js",
     "odin-sync": "node dist/odin_sync.js",
@@ -20,19 +21,7 @@
     "harvest": "node dist/maintenance.js && node dist/odin_sync.js && node dist/portfolio_audit_v2.js && node dist/mirror_opportunity_audit.js && node dist/dune_alpha_runner.js && node dist/harvest_scout.js && node dist/deep_dive_reinvestigate.js && node dist/gauntlet_v6.js && node dist/replay_shadow.js && node dist/cielo_validate.js && node dist/evidence_funnel.js && node dist/engine_intelligence.js",
     "gauntlet": "node dist/maintenance.js && node dist/odin_sync.js && node dist/portfolio_audit_v2.js && node dist/mirror_opportunity_audit.js && node dist/deep_dive_reinvestigate.js && node dist/gauntlet_v6.js && node dist/replay_shadow.js && node dist/cielo_validate.js && node dist/evidence_funnel.js && node dist/engine_intelligence.js"
   },
-  "engines": {
-    "node": ">=20"
-  },
-  "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.17.5",
-    "@solana/web3.js": "^1.98.4",
-    "express": "^5.1.0",
-    "zod": "^3.25.76"
-  },
-  "devDependencies": {
-    "@types/express": "^5.0.3",
-    "@types/node": "^24.3.0",
-    "tsx": "^4.20.5",
-    "typescript": "^5.9.2"
-  }
+  "engines": {"node": ">=20"},
+  "dependencies": {"@modelcontextprotocol/sdk": "^1.17.5","@solana/web3.js": "^1.98.4","express": "^5.1.0","zod": "^3.25.76"},
+  "devDependencies": {"@types/express": "^5.0.3","@types/node": "^24.3.0","tsx": "^4.20.5","typescript": "^5.9.2"}
 }
