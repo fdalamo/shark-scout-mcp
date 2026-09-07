@@ -63,7 +63,6 @@ function classify(r:any){
   else if(status==="UNKNOWN")bucket="INSUFFICIENT_EVIDENCE";
   else if(status==="REJECT"&&priority>100)bucket="REJECT_RECHECK";
 
-  // Expected information gain: spend provider budget where more history could actually change the verdict.
   let informationGain=0;
   if(bucket==="NEAR_PASS_STRESS")informationGain+=100;
   if(bucket==="REPLAY_RECONSTRUCTION")informationGain+=85;
@@ -99,18 +98,22 @@ async function collectOlder(address:string,type:string|undefined,pages:number,se
   return{found:seed,partial,error,pagesFetched,newRows,historyComplete,cursor:before};
 }
 
+async function refreshHead(address:string,seed:Map<string,any>){
+  try{const rows=await fetchPage(address,undefined,"SWAP");let added=0;for(const x of rows){const sig=String(x?.signature||"");if(sig&&!seed.has(sig)){seed.set(sig,x);added++;}}return{added,error:null as string|null};}catch(e){return{added:0,error:e instanceof Error?e.message:String(e)};}
+}
+
 async function helius(address:string,item:QueueEntry){
   if(!HELIUS_API_KEY)return{rows:[] as any[],partial:true,error:"HELIUS_API_KEY missing",newRows:0,pagesFetched:0,mode:"none",historyComplete:false};
   const old=await loadCache(address),seed=rowMap(old.rows),oldCount=seed.size,budget=pageBudget(item);
+  const head=await refreshHead(address,seed);
   const existing=sortedRows(seed),oldest=String(old.oldestSignature||existing[existing.length-1]?.signature||"")||undefined;
-  // First investigation starts at the head; subsequent investigations continue from the oldest verified signature.
   const deep=await collectOlder(address,"SWAP",budget,seed,oldest);
-  let merged=deep.found,partial=deep.partial,error=deep.error,pagesFetched=deep.pagesFetched,historyComplete=Boolean(old.historyComplete)||deep.historyComplete,mode=oldest?"cursor_deepen_swap":"initial_swap";
+  let merged=deep.found,partial=deep.partial,error=head.error||deep.error,pagesFetched=deep.pagesFetched+1,historyComplete=Boolean(old.historyComplete)||deep.historyComplete,mode=oldest?"head_refresh+cursor_deepen_swap":"head_refresh+initial_swap";
   const needsBroad=(merged.size-oldCount)<10||item.bucket==="REPLAY_RECONSTRUCTION"||item.bucket==="HISTORY_RECONSTRUCTION"||item.bucket==="NEAR_PASS_STRESS";
   let broadNew=0;
   if(needsBroad&&!historyComplete){const cur=sortedRows(merged);const broadCursor=String(cur[cur.length-1]?.signature||"")||undefined;const broad=await collectOlder(address,undefined,FALLBACK_PAGES,merged,broadCursor);merged=broad.found;broadNew=broad.newRows;partial=partial||broad.partial;error=error||broad.error;pagesFetched+=broad.pagesFetched;historyComplete=historyComplete||broad.historyComplete;mode+="+unfiltered";}
   const rows=sortedRows(merged),newRows=Math.max(0,rows.length-oldCount),newestSignature=String(rows[0]?.signature||"")||null,oldestSignature=String(rows[rows.length-1]?.signature||"")||null;
-  return{rows,partial:partial&&!historyComplete,error,newRows,broadNew,pagesFetched,mode,historyComplete,newestSignature,oldestSignature,previousRows:oldCount,pageBudget:budget};
+  return{rows,partial:partial&&!historyComplete,error,newRows,headNewRows:head.added,broadNew,pagesFetched,mode,historyComplete,newestSignature,oldestSignature,previousRows:oldCount,pageBudget:budget};
 }
 
 export async function runDeepDiveReinvestigation(){
@@ -120,11 +123,11 @@ export async function runDeepDiveReinvestigation(){
   const bucketRank:Record<string,number>={NEAR_PASS_STRESS:0,REPLAY_RECONSTRUCTION:1,HISTORY_RECONSTRUCTION:2,PROVIDER_RETRY:3,CONTEXT_EXPANSION:4,ECONOMICS_INCOMPLETE:5,INSUFFICIENT_EVIDENCE:6,HOLD_BORDERLINE:7,REJECT_RECHECK:8,LOW_INFORMATION:9};
   candidates.sort((a,b)=>(bucketRank[a.bucket]??99)-(bucketRank[b.bucket]??99)||b.informationGain-a.informationGain||b.priority-a.priority||(a.coverage??0)-(b.coverage??0));
   const selected=candidates.slice(0,BATCH),outcomes:any[]=[];
-  for(const item of selected){const hx=await helius(item.address,item),at=new Date().toISOString();if(hx.rows.length){await fs.mkdir(CACHE_DIR,{recursive:true});await atomic(path.join(CACHE_DIR,`${item.address}.json`),{generatedAt:at,source:"deep_dive_reinvestigation_v4",mode:hx.mode,pageBudget:hx.pageBudget,pagesFetched:hx.pagesFetched,partial:hx.partial,historyComplete:hx.historyComplete,newestSignature:hx.newestSignature,oldestSignature:hx.oldestSignature,rows:hx.rows});if(hx.newRows>0)delete results[item.address];}const record={...item,selectedAt:startedAt,lastAttemptAt:at,attempts:n(item.attempts)+1,totalRows:hx.rows.length,previousRows:hx.previousRows,newRowsFetched:hx.newRows,broadNewRows:hx.broadNew,pagesFetched:hx.pagesFetched,pageBudget:hx.pageBudget,fetchMode:hx.mode,historyComplete:hx.historyComplete,partial:hx.partial,error:hx.error||null,invalidatedForGauntlet:hx.newRows>0};history[item.address]=record;outcomes.push(record);}
+  for(const item of selected){const hx=await helius(item.address,item),at=new Date().toISOString();if(hx.rows.length){await fs.mkdir(CACHE_DIR,{recursive:true});await atomic(path.join(CACHE_DIR,`${item.address}.json`),{generatedAt:at,source:"deep_dive_reinvestigation_v5",mode:hx.mode,pageBudget:hx.pageBudget,pagesFetched:hx.pagesFetched,partial:hx.partial,historyComplete:hx.historyComplete,newestSignature:hx.newestSignature,oldestSignature:hx.oldestSignature,rows:hx.rows});if(hx.newRows>0)delete results[item.address];}const record={...item,selectedAt:startedAt,lastAttemptAt:at,attempts:n(item.attempts)+1,totalRows:hx.rows.length,previousRows:hx.previousRows,newRowsFetched:hx.newRows,headNewRows:hx.headNewRows,broadNewRows:hx.broadNew,pagesFetched:hx.pagesFetched,pageBudget:hx.pageBudget,fetchMode:hx.mode,historyComplete:hx.historyComplete,partial:hx.partial,error:hx.error||null,invalidatedForGauntlet:hx.newRows>0};history[item.address]=record;outcomes.push(record);}
   cp.results=results;cp.updatedAt=new Date().toISOString();await atomic(CHECKPOINT_PATH,cp);
-  const bucketCounts=candidates.reduce((a:AnyObj,x)=>(a[x.bucket]=(a[x.bucket]||0)+1,a),{}),run={startedAt,finishedAt:new Date().toISOString(),candidateCount:candidates.length,selectedCount:selected.length,invalidatedForGauntlet:outcomes.filter(x=>x.invalidatedForGauntlet).length,newRowsFetched:outcomes.reduce((a,x)=>a+n(x.newRowsFetched),0),bucketCounts,selected:outcomes};
-  await atomic(QUEUE_PATH,{schemaVersion:4,updatedAt:new Date().toISOString(),policy:{batch:BATCH,baseSwapPages:PAGES,maxSwapPages:MAX_PAGES,unfilteredFallbackPages:FALLBACK_PAGES,cooldownHours:COOLDOWN_HOURS,history:"persistent per-wallet cursor; every successful pass resumes from oldest verified signature instead of refetching the head",budget:"adaptive pages by expected information gain; near-pass and low-coverage wallets receive deeper history",backoff:"12h -> 24h -> 48h -> 72h cap for zero-new-row attempts",sort:"near-pass > replay reconstruction > history reconstruction > provider retry; then information gain and priority",rejectPolicy:"rejected wallets re-enter only for evidence/sample gaps, never hard-fast or known-bad economics"},entries:history,runs:[...(Array.isArray(prev.runs)?prev.runs.slice(-79):[]),run],queue:candidates.slice(0,50)});
-  console.log(JSON.stringify({event:"shark_scout_deep_dive_reinvestigation_complete",schemaVersion:4,...run,selected:outcomes.map(x=>({address:x.address,bucket:x.bucket,informationGain:x.informationGain,coverage:x.coverage,replayTrades:x.replayTrades,replayNet:x.replayNet,stress50:x.stress50,previousRows:x.previousRows,newRowsFetched:x.newRowsFetched,totalRows:x.totalRows,pagesFetched:x.pagesFetched,pageBudget:x.pageBudget,historyComplete:x.historyComplete,invalidatedForGauntlet:x.invalidatedForGauntlet,error:x.error}))}));return run;
+  const bucketCounts=candidates.reduce((a:AnyObj,x)=>(a[x.bucket]=(a[x.bucket]||0)+1,a),{}),run={startedAt,finishedAt:new Date().toISOString(),candidateCount:candidates.length,selectedCount:selected.length,invalidatedForGauntlet:outcomes.filter(x=>x.invalidatedForGauntlet).length,newRowsFetched:outcomes.reduce((a,x)=>a+n(x.newRowsFetched),0),headNewRows:outcomes.reduce((a,x)=>a+n(x.headNewRows),0),bucketCounts,selected:outcomes};
+  await atomic(QUEUE_PATH,{schemaVersion:5,updatedAt:new Date().toISOString(),policy:{batch:BATCH,baseSwapPages:PAGES,maxSwapPages:MAX_PAGES,unfilteredFallbackPages:FALLBACK_PAGES,cooldownHours:COOLDOWN_HOURS,history:"two-ended cursor: refresh one current SWAP page first, then resume backward from oldest verified signature",budget:"adaptive pages by expected information gain; near-pass and low-coverage wallets receive deeper history",backoff:"12h -> 24h -> 48h -> 72h cap for zero-new-row attempts",sort:"near-pass > replay reconstruction > history reconstruction > provider retry; then information gain and priority",rejectPolicy:"rejected wallets re-enter only for evidence/sample gaps, never hard-fast or known-bad economics"},entries:history,runs:[...(Array.isArray(prev.runs)?prev.runs.slice(-79):[]),run],queue:candidates.slice(0,50)});
+  console.log(JSON.stringify({event:"shark_scout_deep_dive_reinvestigation_complete",schemaVersion:5,...run,selected:outcomes.map(x=>({address:x.address,bucket:x.bucket,informationGain:x.informationGain,coverage:x.coverage,replayTrades:x.replayTrades,replayNet:x.replayNet,stress50:x.stress50,previousRows:x.previousRows,newRowsFetched:x.newRowsFetched,headNewRows:x.headNewRows,totalRows:x.totalRows,pagesFetched:x.pagesFetched,pageBudget:x.pageBudget,historyComplete:x.historyComplete,invalidatedForGauntlet:x.invalidatedForGauntlet,error:x.error}))}));return run;
 }
 
 if(import.meta.url===`file://${process.argv[1]}`)runDeepDiveReinvestigation().catch(e=>{console.error(JSON.stringify({event:"shark_scout_deep_dive_reinvestigation_failed",error:e instanceof Error?e.message:String(e)}));process.exitCode=1;});
