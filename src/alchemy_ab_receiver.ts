@@ -20,7 +20,8 @@ const FOLLOWER_WALLET = process.env.SHARK_FOLLOWER_WALLET?.trim() || "9mVgPUP8eX
 const LIVE_MIRRORS = new Set((process.env.SHARK_LIVE_MIRRORS ?? "").split(",").map(x => x.trim()).filter(Boolean));
 const RESEARCH_COHORT = new Set((process.env.SHARK_RESEARCH_COHORT ?? "").split(",").map(x => x.trim()).filter(Boolean));
 const CONTROL_COHORT = new Set((process.env.SHARK_CONTROL_COHORT ?? "").split(",").map(x => x.trim()).filter(Boolean));
-const VERSION = "ab-3.0.0";
+const VERSION = "ab-3.0.1";
+const RECONCILE_PACE_MS = Math.max(250, Number(process.env.ALCHEMY_AB_RECONCILE_PACE_MS ?? 500));
 const lab = new ProspectiveLab(path.join(DATA_DIR, "prospective-ab"));
 const subscriptionManifest = { follower: FOLLOWER_WALLET, live: [...LIVE_MIRRORS].sort(), research: [...RESEARCH_COHORT].sort(), controls: [...CONTROL_COHORT].sort() };
 const SUBSCRIPTION_MANIFEST_HASH = manifestHash(subscriptionManifest);
@@ -41,10 +42,12 @@ function timingSafeHexEqual(a:string,b:string){try{const aa=Buffer.from(a,"hex")
 function verifySignature(raw:Buffer,supplied:string){if(!SIGNING_KEY||!supplied)return false;return timingSafeHexEqual(crypto.createHmac("sha256",SIGNING_KEY).update(raw).digest("hex"),supplied);}
 function eventId(payload:any,raw:Buffer){return String(payload?.id||payload?.event?.signature||payload?.signature||crypto.createHash("sha256").update(raw).digest("hex"));}
 function acceptEnvelope(e:EventEnvelope){lab.commitEnvelope(e);race.seen(e);if(e.role==="LIVE_SOURCE"||e.role==="RESEARCH"||e.role==="CONTROL")flight.source(e);state.envelopes++;}
+function sleep(ms:number){return new Promise(resolve=>setTimeout(resolve,ms));}
 
 async function rpcCall(method:string,params:unknown[]){const r=await fetch(RPC_URL,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({jsonrpc:"2.0",id:1,method,params})});if(!r.ok)throw new Error(`rpc_http_${r.status}`);const j:any=await r.json();if(j.error)throw new Error(`rpc_${j.error.code}:${j.error.message}`);return j.result;}
 const reconciler = RPC_URL ? new RpcReconciler(path.join(DATA_DIR,"prospective-ab"),lab,rpcCall,roleFor) : null;
-async function reconcileTick(){if(!reconciler)return;for(const wallet of trackedWallets){try{const rows=await reconciler.reconcile(wallet,100);for(const e of rows){race.seen(e);if(e.role==="LIVE_SOURCE"||e.role==="RESEARCH"||e.role==="CONTROL")flight.source(e);}state.rpcReconciled+=rows.length;}catch(err){state.reconcileErrors++;console.warn(JSON.stringify({level:"warn",event:"shark_scout_ab_reconcile_error",wallet,error:String(err)}));}}persistState();}
+let reconcileRunning=false;
+async function reconcileTick(){if(!reconciler||reconcileRunning)return;reconcileRunning=true;try{let i=0;for(const wallet of trackedWallets){if(i++>0)await sleep(RECONCILE_PACE_MS);try{const rows=await reconciler.reconcile(wallet,100);for(const e of rows){race.seen(e);if(e.role==="LIVE_SOURCE"||e.role==="RESEARCH"||e.role==="CONTROL")flight.source(e);}state.rpcReconciled+=rows.length;}catch(err){state.reconcileErrors++;console.warn(JSON.stringify({level:"warn",event:"shark_scout_ab_reconcile_error",wallet,error:String(err)}));}}persistState();}finally{reconcileRunning=false;}}
 
 const wssSubs=new Map<string,number>();let wssConnection:Connection|null=null;
 function subscribeWallet(wallet:string){if(!wssConnection||wssSubs.has(wallet))return;try{const id=wssConnection.onLogs(new PublicKey(wallet),log=>{const now=new Date().toISOString();const e:EventEnvelope={schemaVersion:2,eventId:sha256(`wss:${wallet}:${log.signature}`),provider:"SOLANA_TRACKER",transport:"tracker_wss",receivedAt:now,providerCreatedAt:null,wallet,role:roleFor(wallet),signature:log.signature,slot:null,blockTime:null,eventType:"LOGS_MENTION",rawPayloadHash:sha256(JSON.stringify(log)),sourceEventId:log.signature,prospectiveEligible:true};acceptEnvelope(e);state.wssSeen++;persistState();},"confirmed");wssSubs.set(wallet,id);}catch(err){state.wssErrors++;console.warn(JSON.stringify({level:"warn",event:"shark_scout_ab_wss_subscribe_error",wallet,error:String(err)}));}}
@@ -55,7 +58,7 @@ function summary(){const rows=readResults();return{layers:byLayer(rows),bootstra
 
 const app=express();app.disable("x-powered-by");
 app.get("/health",(_req,res)=>res.json({ok:true,service:"shark-scout-alchemy-ab",version:VERSION,signingKeyConfigured:Boolean(SIGNING_KEY),rpcConfigured:Boolean(RPC_URL),wssConfigured:Boolean(WSS_URL),persistence:DATA_DIR,received:state.received,verified:state.verified,envelopes:state.envelopes,rpcReconciled:state.rpcReconciled,wssSeen:state.wssSeen,duplicates:state.duplicates,manifestHash:SUBSCRIPTION_MANIFEST_HASH,time:new Date().toISOString()}));
-app.get("/prospective/status",(_req,res)=>res.json({ok:true,version:VERSION,state:{...state,uniqueEventIds:undefined},manifest:{...subscriptionManifest,hash:SUBSCRIPTION_MANIFEST_HASH},runtime:{rpc: Boolean(RPC_URL),wss:Boolean(WSS_URL),wssSubscriptions:wssSubs.size,reconcileEveryMs:60000},metrics:summary(),prospectiveEligibility:SIGNING_KEY?"VERIFIED_ONLY":"BOOTSTRAP_TEST_ONLY"}));
+app.get("/prospective/status",(_req,res)=>res.json({ok:true,version:VERSION,state:{...state,uniqueEventIds:undefined},manifest:{...subscriptionManifest,hash:SUBSCRIPTION_MANIFEST_HASH},runtime:{rpc:Boolean(RPC_URL),wss:Boolean(WSS_URL),wssSubscriptions:wssSubs.size,reconcileEveryMs:60000,reconcilePaceMs:RECONCILE_PACE_MS,reconcileRunning},metrics:summary(),prospectiveEligibility:SIGNING_KEY?"VERIFIED_ONLY":"BOOTSTRAP_TEST_ONLY"}));
 
 app.post("/webhooks/alchemy/address-activity",express.raw({type:"application/json",limit:"1mb"}),(req:Request,res:Response)=>{
  const receivedAt=new Date().toISOString(),raw=Buffer.isBuffer(req.body)?req.body:Buffer.from(req.body??""),supplied=String(req.header("x-alchemy-signature")??""),verified=verifySignature(raw,supplied),bootstrap=!SIGNING_KEY;state.received++;state.bytes+=raw.length;state.lastReceivedAt=receivedAt;
