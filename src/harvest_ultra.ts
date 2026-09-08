@@ -13,10 +13,10 @@ const TOKEN_LIMIT = clamp(Number(process.env.HARVEST_TOKEN_LIMIT || 50),5,50);
 const TRADERS_PER_TOKEN = clamp(Number(process.env.HARVEST_TRADERS_PER_TOKEN || 10),3,10);
 const PROFILE_LIMIT = clamp(Number(process.env.HARVEST_PROFILE_LIMIT || 60),0,180);
 const GLOBAL_WALLET_LIMIT = clamp(Number(process.env.HARVEST_GLOBAL_WALLET_LIMIT || 220),40,600);
-const PROFILE_STALE_MINUTES = clamp(Number(process.env.HARVEST_PROFILE_STALE_MINUTES || 180),30,1440);
-const PROFILE_WARM_MINUTES = clamp(Number(process.env.HARVEST_PROFILE_WARM_MINUTES || Math.max(720,PROFILE_STALE_MINUTES*4)),PROFILE_STALE_MINUTES,10080);
+const PROFILE_STALE_MINUTES = clamp(Number(process.env.HARVEST_PROFILE_STALE_MINUTES || 360),30,1440);
+const PROFILE_WARM_MINUTES = clamp(Number(process.env.HARVEST_PROFILE_WARM_MINUTES || Math.max(720,PROFILE_STALE_MINUTES*2)),PROFILE_STALE_MINUTES,10080);
 const PROFILE_COLD_MINUTES = clamp(Number(process.env.HARVEST_PROFILE_COLD_MINUTES || Math.max(1440,PROFILE_WARM_MINUTES*2)),PROFILE_WARM_MINUTES,20160);
-const PROFILE_UNKNOWN_MINUTES = clamp(Number(process.env.HARVEST_PROFILE_UNKNOWN_MINUTES || Math.max(360,PROFILE_STALE_MINUTES*2)),PROFILE_STALE_MINUTES,2880);
+const PROFILE_UNKNOWN_MINUTES = clamp(Number(process.env.HARVEST_PROFILE_UNKNOWN_MINUTES || Math.max(360,PROFILE_STALE_MINUTES)),PROFILE_STALE_MINUTES,2880);
 const CACHE_ROWS = clamp(Number(process.env.HARVEST_CACHE_ROWS_PER_WALLET || 24),8,50);
 const CACHE_KEEP_HOURS = clamp(Number(process.env.HARVEST_CACHE_KEEP_HOURS || 12),3,72);
 const TIMEOUT_MS = clamp(Number(process.env.REQUEST_TIMEOUT_MS || 25000),3000,60000);
@@ -62,17 +62,19 @@ function score(w:Wallet){const om=w.discovery?.outcomeMiner||{},providerCount=ne
 function profileTier(w:Wallet):ProfileTier{
   if(!w.lastProfiledAt)return "NEW";
   if(w.status==="UNKNOWN")return "UNKNOWN";
-  const providers=new Set(w.providers||[]).size,lanes=(w.lanes||[]).join(" ").toUpperCase(),tokens=w.tokens?.length||0,rediscovery=Math.max(0,Number(w.rediscoveryCount||0));
-  if(providers>=2||tokens>=2||rediscovery>=3||/DUNE_|CIELO_QUALITY_TAG|CROSS_TOKEN|TOKEN_WINNER/.test(lanes))return "HOT";
+  const providerCount=new Set(w.providers||[]).size,lanes=(w.lanes||[]).join(" ").toUpperCase(),tokenCount=w.tokens?.length||0,rediscovery=Math.max(0,Number(w.rediscoveryCount||0));
+  const multiProvider=providerCount>=2,crossToken=tokenCount>=2||lanes.includes("CROSS_TOKEN"),strongRediscovery=rediscovery>=3;
+  const qualityLane=/DUNE_(CURATED|SLOW_PREFERRED|SLOW_IDEAL)|CIELO_QUALITY_TAG/.test(lanes);
+  if((multiProvider&&(crossToken||strongRediscovery||qualityLane))||(crossToken&&strongRediscovery)||(qualityLane&&(multiProvider||rediscovery>=2)))return "HOT";
   const newest=Number(w.profile?.heliusRecent?.newestTimestamp||0),recentDays=newest>0?(Date.now()-newest*1000)/86400000:Infinity;
-  if(rediscovery>=2||recentDays<=14)return "WARM";
+  if(multiProvider||crossToken||rediscovery>=2||qualityLane||recentDays<=14)return "WARM";
   return "COLD";
 }
 function profileTtlMinutes(w:Wallet){const tier=profileTier(w);if(tier==="NEW")return 0;if(tier==="HOT")return PROFILE_STALE_MINUTES;if(tier==="WARM")return PROFILE_WARM_MINUTES;if(tier==="UNKNOWN")return PROFILE_UNKNOWN_MINUTES;return PROFILE_COLD_MINUTES;}
 function profileDueInfo(w:Wallet){const tier=profileTier(w),ttlMinutes=profileTtlMinutes(w);if(!w.lastProfiledAt)return{due:true,tier,ttlMinutes,ageMinutes:Infinity,overdueRatio:Infinity};const t=Date.parse(w.lastProfiledAt);if(!Number.isFinite(t))return{due:true,tier,ttlMinutes,ageMinutes:Infinity,overdueRatio:Infinity};const ageMinutes=Math.max(0,(Date.now()-t)/60000);return{due:ageMinutes>=ttlMinutes,tier,ttlMinutes,ageMinutes,overdueRatio:ttlMinutes>0?ageMinutes/ttlMinutes:Infinity};}
 function profileDue(w:Wallet){return profileDueInfo(w).due;}
 function tierRank(t:ProfileTier){return t==="NEW"?5:t==="HOT"?4:t==="WARM"?3:t==="UNKNOWN"?2:1;}
-function dueBreakdown(wallets:Wallet[]){const out:Record<ProfileTier,number>={NEW:0,HOT:0,WARM:0,UNKNOWN:0,COLD:0};for(const w of wallets){const x=profileDueInfo(w);if(x.due)out[x.tier]++;}return out;}
+function tierBreakdown(wallets:Wallet[],dueOnly=false){const out:Record<ProfileTier,number>={NEW:0,HOT:0,WARM:0,UNKNOWN:0,COLD:0};for(const w of wallets){const x=profileDueInfo(w);if(!dueOnly||x.due)out[x.tier]++;}return out;}
 function upsert(state:State,row:any,mint:string){const a=walletAddress(row);if(!a)return false;const t=now(),tags=tagsFrom(row),e=state.wallets[a];if(!e){state.wallets[a]={address:a,firstSeen:t,lastSeen:t,rediscoveryCount:1,tokens:[mint],providers:["birdeye"],lanes:["TOKEN_WINNER"],tags,status:"RAW",discovery:{birdeye:{realizedPnl:row?.realizedPnl??row?.realized_pnl??null,unrealizedPnl:row?.unrealizedPnl??row?.unrealized_pnl??null}}};return true;}e.lastSeen=t;e.rediscoveryCount=(e.rediscoveryCount||0)+1;e.tokens=uniq([...(e.tokens||[]),mint]);e.providers=uniq([...(e.providers||[]),"birdeye"]);e.tags=uniq([...(e.tags||[]),...tags]);if(e.tokens.length>=2)e.lanes=uniq([...(e.lanes||[]),"CROSS_TOKEN"]);return false;}
 
 export async function runHarvest(){
@@ -87,7 +89,7 @@ export async function runHarvest(){
   for(const w of screenTargets){const bad=badTag(w.tags||[]);if(bad){w.status="REJECTED";w.rejectionReason=`tag:${bad}`;tagRejected++;continue;}const ent=await entityType(w.address);screened++;if(!ent.valid){w.status="REJECTED";w.rejectionReason=ent.reason||"invalid_entity";invalid++;continue;}w.status="CHEAP_PASS";}
 
   const eligible=Object.values(state.wallets).filter(w=>["CHEAP_PASS","PROFILED","UNKNOWN"].includes(w.status));
-  const dueBefore=dueBreakdown(eligible);
+  const tierPopulationBefore=tierBreakdown(eligible),dueBefore=tierBreakdown(eligible,true);
   const profileTargets=eligible.filter(profileDue).sort((a,b)=>{
     const ai=profileDueInfo(a),bi=profileDueInfo(b);
     if(tierRank(ai.tier)!==tierRank(bi.tier))return tierRank(bi.tier)-tierRank(ai.tier);
@@ -98,13 +100,13 @@ export async function runHarvest(){
   for(const w of profileTargets){const info=profileDueInfo(w);selectedByTier[info.tier]++;const rows=await heliusRecent(w.address),h=summarizeHelius(rows);w.lastProfiledAt=now();w.profile={...(w.profile||{}),heliusRecent:h,profileScheduler:{tier:info.tier,ttlMinutes:info.ttlMinutes,profiledAt:w.lastProfiledAt}};if(rows){cachedRows+=await writeWalletCache(w.address,rows,w.lastProfiledAt);cacheWrites++;}if(h){w.status="PROFILED";delete w.rejectionReason;profiled++;}else{w.status="UNKNOWN";w.rejectionReason="helius_profile_unavailable";unknown++;}}
 
   const eligibleAfter=Object.values(state.wallets).filter(w=>["CHEAP_PASS","PROFILED","UNKNOWN"].includes(w.status));
-  const dueAfter=dueBreakdown(eligibleAfter);
+  const tierPopulationAfter=tierBreakdown(eligibleAfter),dueAfter=tierBreakdown(eligibleAfter,true);
   const dueBeforeTotal=Object.values(dueBefore).reduce((a,b)=>a+b,0),dueAfterTotal=Object.values(dueAfter).reduce((a,b)=>a+b,0);
   const cachePruned=await pruneCacheDir(),total=Object.keys(state.wallets).length,cross=Object.values(state.wallets).filter(w=>(w.tokens?.length||0)>=2).length,rejected=Object.values(state.wallets).filter(w=>w.status==="REJECTED").length,rawRemaining=Object.values(state.wallets).filter(w=>w.status==="RAW").length;
-  const telemetry={startedAt,finishedAt:now(),birdeyeDiscoveryEnabled:BIRDEYE_DISCOVERY_ENABLED,tokensExamined:tokens.length,rawWalletHits:raw,newUniqueWallets:Math.max(total-before,0),duplicates:dupes,cheapScreened:screened,invalidEntities:invalid,tagRejected,profiled,unknown,cumulativeUniqueWallets:total,cumulativeRejectedWallets:rejected,crossTokenWallets:cross,rawRemaining,profileDueRemaining:dueAfterTotal,profileStaleMinutes:PROFILE_STALE_MINUTES,profileTtlsMinutes:{hot:PROFILE_STALE_MINUTES,warm:PROFILE_WARM_MINUTES,unknown:PROFILE_UNKNOWN_MINUTES,cold:PROFILE_COLD_MINUTES},profileBacklog:{dueBefore:dueBeforeTotal,dueBeforeByTier:dueBefore,selected:profileTargets.length,selectedByTier,dueAfter:dueAfterTotal,dueAfterByTier:dueAfter,netDueDelta:dueAfterTotal-dueBeforeTotal},providerWork:{rpcEntityChecks:screened,heliusProfileRequests:profileTargets.length,birdeyeDiscoveryCallsApprox:tokens.length?1+tokens.length:0},heliusCacheWrites:cacheWrites,heliusCachedRows:cachedRows,heliusCachePruned:cachePruned,cacheMode:"per_wallet_compact_v2",providerErrors};
+  const telemetry={startedAt,finishedAt:now(),birdeyeDiscoveryEnabled:BIRDEYE_DISCOVERY_ENABLED,tokensExamined:tokens.length,rawWalletHits:raw,newUniqueWallets:Math.max(total-before,0),duplicates:dupes,cheapScreened:screened,invalidEntities:invalid,tagRejected,profiled,unknown,cumulativeUniqueWallets:total,cumulativeRejectedWallets:rejected,crossTokenWallets:cross,rawRemaining,profileDueRemaining:dueAfterTotal,profileStaleMinutes:PROFILE_STALE_MINUTES,profileTtlsMinutes:{hot:PROFILE_STALE_MINUTES,warm:PROFILE_WARM_MINUTES,unknown:PROFILE_UNKNOWN_MINUTES,cold:PROFILE_COLD_MINUTES},profileBacklog:{tierPopulationBefore,dueBefore:dueBeforeTotal,dueBeforeByTier:dueBefore,selected:profileTargets.length,selectedByTier,dueAfter:dueAfterTotal,dueAfterByTier:dueAfter,tierPopulationAfter,netDueDelta:dueAfterTotal-dueBeforeTotal},providerWork:{rpcEntityChecks:screened,heliusProfileRequests:profileTargets.length,birdeyeDiscoveryCallsApprox:tokens.length?1+tokens.length:0},heliusCacheWrites:cacheWrites,heliusCachedRows:cachedRows,heliusCachePruned:cachePruned,cacheMode:"per_wallet_compact_v2",providerErrors};
   state.updatedAt=now();state.runs=[...state.runs.slice(-199),telemetry];await atomicSave(STATE_PATH,state);
   const top=Object.values(state.wallets).filter(w=>w.status==="PROFILED").sort((a,b)=>score(b)-score(a)).slice(0,50).map(w=>({address:w.address,status:w.status,profileTier:profileTier(w),profileTtlMinutes:profileTtlMinutes(w),uniqueTokensSeen:w.tokens?.length||0,rediscoveryCount:w.rediscoveryCount,providers:w.providers,lanes:w.lanes,profile:w.profile}));
-  const report={schemaVersion:8,generatedAt:now(),telemetry,note:"Harvest uses an evidence-tier scheduler: Dune/Cielo/Birdeye convergence and cross-token rediscovery keep high-value wallets hot while ordinary stale wallets refresh less often. This reduces Helius waste without lowering canonical/Odin promotion standards.",rankedDiscoveryCandidates:top};
+  const report={schemaVersion:9,generatedAt:now(),telemetry,note:"Harvest uses a conservative evidence-tier scheduler: HOT requires corroborating evidence (provider convergence, cross-token recurrence, rediscovery, or curated-quality evidence) rather than a single common discovery lane. WARM retains useful but weaker evidence; ordinary profiles cool to longer refresh intervals. This reduces Helius waste without lowering canonical/Odin promotion standards.",rankedDiscoveryCandidates:top};
   await atomicSave(REPORT_PATH,report);return report;
 }
 if(import.meta.url===`file://${process.argv[1]}`)runHarvest().then((r:any)=>console.log(JSON.stringify({event:"shark_scout_harvest_complete",telemetry:r.telemetry,topCandidates:r.rankedDiscoveryCandidates.slice(0,5)}))).catch(e=>{console.error(JSON.stringify({event:"shark_scout_harvest_failed",error:e instanceof Error?e.message:String(e)}));process.exitCode=1;});
