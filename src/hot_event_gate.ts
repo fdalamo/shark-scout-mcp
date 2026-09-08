@@ -14,6 +14,35 @@ const TARGETS=(process.env.HOT_EVENT_WALLETS||[
 async function load():Promise<State>{try{const x=JSON.parse(await fs.readFile(STATE_PATH,"utf8"));return{schemaVersion:1,updatedAt:x.updatedAt||new Date(0).toISOString(),lastForcedAt:x.lastForcedAt||new Date(0).toISOString(),signatures:x.signatures||{}};}catch{return{schemaVersion:1,updatedAt:new Date(0).toISOString(),lastForcedAt:new Date(0).toISOString(),signatures:{}};}}
 async function atomic(file:string,value:unknown){await fs.mkdir(path.dirname(file),{recursive:true});const tmp=`${file}.${process.pid}.tmp`;await fs.writeFile(tmp,JSON.stringify(value));await fs.rename(tmp,file);}
 async function latestSignature(wallet:string){const x=await routedRpc("getSignaturesForAddress",[wallet,{limit:1}]);const rows=Array.isArray(x.result)?x.result as Array<{signature?:string}>:[];return rows[0]?.signature||null;}
-async function main(){const startedAt=new Date().toISOString(),previous=await load(),current:Record<string,string|null>={},errors:string[]=[];let changed=false;for(const wallet of TARGETS){try{current[wallet]=providerFabricEnabled()?await latestSignature(wallet):previous.signatures[wallet]||null;if(current[wallet]!==previous.signatures[wallet])changed=true;}catch(e){errors.push(`${wallet}:${String(e)}`);changed=true;current[wallet]=previous.signatures[wallet]||null;}}
-const forced=Date.now()-Date.parse(previous.lastForcedAt)>=FORCE_HOURS*3600_000;const refresh=changed||forced||errors.length>0;const next:State={schemaVersion:1,updatedAt:new Date().toISOString(),lastForcedAt:forced?new Date().toISOString():previous.lastForcedAt,signatures:{...previous.signatures,...current}};await atomic(STATE_PATH,next);const decision={schemaVersion:1,event:"shark_scout_hot_event_gate",startedAt,finishedAt:new Date().toISOString(),targets:TARGETS.length,changed,forced,refresh,errors,currentSignatures:current};await atomic(DECISION_PATH,decision);console.log(JSON.stringify({level:"info",...decision}));}
-main().catch(async e=>{const decision={schemaVersion:1,event:"shark_scout_hot_event_gate",finishedAt:new Date().toISOString(),targets:TARGETS.length,changed:true,forced:false,refresh:true,errors:[String(e)]};try{await atomic(DECISION_PATH,decision);}catch{}console.log(JSON.stringify({level:"warn",...decision}));process.exitCode=0;});
+async function main(){
+  const startedAt=new Date().toISOString(),previous=await load(),current:Record<string,string|null>={},errors:string[]=[];
+  let changed=false,observedSignatures=0,baselineSignatures=0,unavailableSignatures=0;
+  const fabricEnabled=providerFabricEnabled();
+  for(const wallet of TARGETS){
+    const prior=previous.signatures[wallet]??null;
+    try{
+      const observed=fabricEnabled?await latestSignature(wallet):prior;
+      current[wallet]=observed;
+      if(observed){
+        observedSignatures++;
+        if(prior){if(observed!==prior)changed=true;}
+        else baselineSignatures++;
+      }else unavailableSignatures++;
+    }catch(e){
+      errors.push(`${wallet}:${String(e)}`);
+      current[wallet]=prior;
+      if(prior)observedSignatures++;else unavailableSignatures++;
+    }
+  }
+  // A null/unknown signature is not evidence of a source-wallet change. The hourly MONITOR pass
+  // has already run Paper/Dip once; FINALIZE repeats only for a proven signature change, the
+  // deliberate periodic safety refresh, or an RPC error where fail-open is preferable.
+  const forced=Date.now()-Date.parse(previous.lastForcedAt)>=FORCE_HOURS*3600_000;
+  const refresh=changed||forced||errors.length>0;
+  const next:State={schemaVersion:1,updatedAt:new Date().toISOString(),lastForcedAt:forced?new Date().toISOString():previous.lastForcedAt,signatures:{...previous.signatures,...current}};
+  await atomic(STATE_PATH,next);
+  const decision={schemaVersion:1,event:"shark_scout_hot_event_gate",startedAt,finishedAt:new Date().toISOString(),targets:TARGETS.length,fabricEnabled,changed,forced,refresh,observedSignatures,baselineSignatures,unavailableSignatures,errors,currentSignatures:current};
+  await atomic(DECISION_PATH,decision);
+  console.log(JSON.stringify({level:"info",...decision}));
+}
+main().catch(async e=>{const decision={schemaVersion:1,event:"shark_scout_hot_event_gate",finishedAt:new Date().toISOString(),targets:TARGETS.length,changed:false,forced:false,refresh:true,observedSignatures:0,baselineSignatures:0,unavailableSignatures:TARGETS.length,errors:[String(e)]};try{await atomic(DECISION_PATH,decision);}catch{}console.log(JSON.stringify({level:"warn",...decision}));process.exitCode=0;});
