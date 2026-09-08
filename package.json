@@ -8,6 +8,7 @@
     "build": "tsc -p tsconfig.json",
     "test:replay": "node dist/replay_core_selftest.js",
     "start": "node dist/browser.js",
+    "alchemy-ab": "node dist/alchemy_ab_receiver.js",
     "maintenance": "node dist/maintenance.js",
     "odin-sync": "node dist/odin_sync.js",
     "portfolio-audit": "node dist/portfolio_audit_v2.js",
