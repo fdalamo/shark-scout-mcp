@@ -18,8 +18,9 @@ const stages:Stage[]=[
   {name:"maintenance",phase:"MONITOR",workClass:"HOT",args:["dist/maintenance.js"],timeoutMs:2*MINUTE,continueOnFailure:true},
   {name:"odin_sync",phase:"MONITOR",workClass:"HOT",args:["dist/odin_sync.js"],timeoutMs:2*MINUTE,continueOnFailure:true},
   {name:"portfolio_audit",phase:"MONITOR",workClass:"HOT",args:["dist/portfolio_audit_v2.js"],timeoutMs:3*MINUTE,continueOnFailure:true},
-  {name:"opportunity_audit",phase:"MONITOR",workClass:"HOT",args:["dist/mirror_opportunity_audit.js"],timeoutMs:4*MINUTE,continueOnFailure:true},
-  {name:"paper_odin_fast",phase:"MONITOR",workClass:"HOT",args:["dist/paper_odin.js"],timeoutMs:4*MINUTE,continueOnFailure:true},
+  {name:"opportunity_audit",phase:"MONITOR",workClass:"HOT",args:["dist/mirror_opportunity_audit_v2.js"],timeoutMs:4*MINUTE,continueOnFailure:true},
+  {name:"paper_odin_fast",phase:"MONITOR",workClass:"HOT",args:["dist/paper_odin_v2.js"],timeoutMs:4*MINUTE,continueOnFailure:true},
+  {name:"odin_truth_ledger",phase:"MONITOR",workClass:"HOT",args:["dist/odin_truth_ledger.js"],timeoutMs:1*MINUTE,continueOnFailure:true},
   {name:"dip_shadow_fast",phase:"MONITOR",workClass:"HOT",args:["dist/dip_shadow.js"],timeoutMs:4*MINUTE,continueOnFailure:true},
 
   {name:"dune_alpha",phase:"DISCOVERY",workClass:"COLD",args:["dist/dune_alpha_runner.js"],timeoutMs:3*MINUTE,continueOnFailure:true},
@@ -36,11 +37,13 @@ const stages:Stage[]=[
   {name:"canonical_overlay",phase:"CANONICAL",workClass:"SYSTEM",args:["dist/canonical_gauntlet_overlay.js"],timeoutMs:3*MINUTE},
 
   {name:"hot_event_gate",phase:"FINALIZE",workClass:"SYSTEM",args:["dist/hot_event_gate.js"],timeoutMs:2*MINUTE,continueOnFailure:true},
-  {name:"paper_odin_refresh",phase:"FINALIZE",workClass:"HOT",args:["dist/paper_odin.js"],timeoutMs:4*MINUTE,continueOnFailure:true},
+  {name:"paper_odin_refresh",phase:"FINALIZE",workClass:"HOT",args:["dist/paper_odin_v2.js"],timeoutMs:4*MINUTE,continueOnFailure:true},
+  {name:"odin_truth_refresh",phase:"FINALIZE",workClass:"HOT",args:["dist/odin_truth_ledger.js"],timeoutMs:1*MINUTE,continueOnFailure:true},
   {name:"dip_shadow_refresh",phase:"FINALIZE",workClass:"HOT",args:["dist/dip_shadow.js"],timeoutMs:4*MINUTE,continueOnFailure:true},
   {name:"odin_cap_audit",phase:"FINALIZE",workClass:"HOT",args:["dist/odin_cap_audit.js"],timeoutMs:3*MINUTE,continueOnFailure:true},
   {name:"cielo_validate",phase:"FINALIZE",workClass:"COLD",args:["dist/cielo_validate.js"],timeoutMs:3*MINUTE,continueOnFailure:true},
   {name:"evidence_funnel",phase:"FINALIZE",workClass:"SYSTEM",args:["dist/evidence_funnel.js"],timeoutMs:3*MINUTE},
+  {name:"prospective_walkforward",phase:"FINALIZE",workClass:"SYSTEM",args:["dist/prospective_walkforward.js"],timeoutMs:1*MINUTE,continueOnFailure:true},
   {name:"engine_intelligence",phase:"FINALIZE",workClass:"SYSTEM",args:["dist/engine_intelligence.js"],timeoutMs:3*MINUTE},
   {name:"external_evidence_overlay",phase:"FINALIZE",workClass:"SYSTEM",args:["dist/external_evidence_overlay.js"],timeoutMs:2*MINUTE}
 ];
@@ -53,7 +56,7 @@ function hotRefreshNeeded(){try{const x=JSON.parse(readFileSync(HOT_EVENT_DECISI
 function heliusHardQuotaCoolingDown(){try{const x=JSON.parse(readFileSync(GAUNTLET_REPORT_PATH,"utf8"));const opens=Number(x?.providerStats?.heliusCircuitOpens||0),at=Date.parse(String(x?.finishedAt||x?.generatedAt||"")),ageMs=Date.now()-at;if(opens<=0||!Number.isFinite(ageMs)||ageMs<0||ageMs>HELIUS_HARD_QUOTA_COOLDOWN_MS)return null;return{opens,ageMs,until:new Date(at+HELIUS_HARD_QUOTA_COOLDOWN_MS).toISOString()};}catch{return null;}}
 async function runStage(stage:Stage,timeoutMs:number):Promise<StageResult>{const started=Date.now();log("shark_scout_stage_started",{stage:stage.name,phase:stage.phase,workClass:stage.workClass,timeoutMs});return await new Promise<StageResult>((resolve)=>{let timedOut=false,settled=false;const finish=(r:StageResult)=>{if(settled)return;settled=true;resolve(r);};const child=spawn(process.execPath,stage.args,{stdio:"inherit",env:{...process.env,SCOUT_WORK_CLASS:stage.workClass,...stage.env}});const timer=setTimeout(()=>{timedOut=true;log("shark_scout_stage_timeout",{stage:stage.name,phase:stage.phase,workClass:stage.workClass,elapsedMs:Date.now()-started});child.kill("SIGTERM");setTimeout(()=>{if(child.exitCode===null)child.kill("SIGKILL");},5000).unref();},timeoutMs);child.on("error",()=>{clearTimeout(timer);finish({name:stage.name,phase:stage.phase,workClass:stage.workClass,status:timedOut?"TIMED_OUT":"FAILED",durationMs:Date.now()-started,exitCode:null,signal:null});});child.on("exit",(code,signal)=>{clearTimeout(timer);finish({name:stage.name,phase:stage.phase,workClass:stage.workClass,status:timedOut?"TIMED_OUT":code===0?"SUCCESS":"FAILED",durationMs:Date.now()-started,exitCode:code,signal});});});}
 
-async function main(){const pipelineStarted=Date.now(),startedAt=new Date(pipelineStarted).toISOString(),deadline=pipelineStarted+PIPELINE_BUDGET_MS,results:StageResult[]=[];let lastPhase:Phase|null=null,canonicalSnapshotTaken=false;const queueCounts={HOT:stages.filter(x=>x.workClass==="HOT").length,COLD:stages.filter(x=>x.workClass==="COLD").length,SYSTEM:stages.filter(x=>x.workClass==="SYSTEM").length};log("shark_scout_pipeline_started",{version:7,stageCount:stages.length,queueCounts,budgetMs:PIPELINE_BUDGET_MS,finalizeReserveMs:FINALIZE_RESERVE_MS,eventDrivenHotRefresh:true,sharedHeliusHardQuotaCircuit:true});
+async function main(){const pipelineStarted=Date.now(),startedAt=new Date(pipelineStarted).toISOString(),deadline=pipelineStarted+PIPELINE_BUDGET_MS,results:StageResult[]=[];let lastPhase:Phase|null=null,canonicalSnapshotTaken=false;const queueCounts={HOT:stages.filter(x=>x.workClass==="HOT").length,COLD:stages.filter(x=>x.workClass==="COLD").length,SYSTEM:stages.filter(x=>x.workClass==="SYSTEM").length};log("shark_scout_pipeline_started",{version:8,stageCount:stages.length,queueCounts,budgetMs:PIPELINE_BUDGET_MS,finalizeReserveMs:FINALIZE_RESERVE_MS,eventDrivenHotRefresh:true,sharedHeliusHardQuotaCircuit:true,odinResearchCore:"v0.42"});
 const emergencyRestore=async(reason:string)=>{if(!canonicalSnapshotTaken)return true;log("shark_scout_emergency_restore_started",{reason});const restoreStage:Stage={name:"canonical_restore_emergency",phase:"FINALIZE",workClass:"SYSTEM",args:["dist/canonical_state_guard.js","restore"],timeoutMs:2*MINUTE};const restore=await runStage(restoreStage,2*MINUTE);results.push(restore);log("shark_scout_stage_finished",restore);if(restore.status==="SUCCESS"){canonicalSnapshotTaken=false;return true;}log("shark_scout_emergency_restore_failed",{reason,restore});return false;};
 for(const stage of stages){if(stage.phase!==lastPhase){lastPhase=stage.phase;log("shark_scout_phase_started",{phase:lastPhase,elapsedMs:Date.now()-pipelineStarted,remainingMs:deadline-Date.now()});}const remaining=Math.max(0,deadline-Date.now());
   // COLD always yields first. HOT and SYSTEM are never dropped merely to preserve COLD throughput.
