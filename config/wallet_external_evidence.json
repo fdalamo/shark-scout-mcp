@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "wallets": {
+    "5mcTKhm5iyb8Zz3jpxuNr7BT78i6AKy5RqoMGkFNj8ZZ": {
+      "source": "Birdeye Wallet Analyzer",
+      "observedAt": "2026-09-07T19:10:00",
+      "sourceType": "user_provided_snapshot",
+      "reviewRequired": true,
+      "metrics": {
+        "soldGreaterThanBoughtPct": 33.33,
+        "didntBuyPct": 12.5,
+        "instantSellPct": 8.33,
+        "scamRugTokenPct": 37.5
+      },
+      "notes": [
+        "External wallet-analyzer evidence is a copyability-risk input, not a standalone reject.",
+        "Sold-greater-than-bought and didn't-buy flags can indicate transferred or pre-existing inventory that a follower could not have copied.",
+        "Instant-sell and scam/rug exposure can increase follower execution and liquidity risk.",
+        "Keep this wallet in Paper Odin and Dip Shadow while reviewRequired is true; do not promote to live solely from canonical replay evidence."
+      ]
+    }
+  }
+}
