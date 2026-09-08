@@ -36,7 +36,8 @@ const stages:Stage[]=[
   {name:"odin_cap_audit",phase:"FINALIZE",args:["dist/odin_cap_audit.js"],timeoutMs:3*MINUTE,continueOnFailure:true},
   {name:"cielo_validate",phase:"FINALIZE",args:["dist/cielo_validate.js"],timeoutMs:3*MINUTE,continueOnFailure:true},
   {name:"evidence_funnel",phase:"FINALIZE",args:["dist/evidence_funnel.js"],timeoutMs:3*MINUTE},
-  {name:"engine_intelligence",phase:"FINALIZE",args:["dist/engine_intelligence.js"],timeoutMs:3*MINUTE}
+  {name:"engine_intelligence",phase:"FINALIZE",args:["dist/engine_intelligence.js"],timeoutMs:3*MINUTE},
+  {name:"external_evidence_overlay",phase:"FINALIZE",args:["dist/external_evidence_overlay.js"],timeoutMs:2*MINUTE}
 ];
 
 const protectedCanonicalStages=new Set(["deep_dive","gauntlet_v6","canonical_restore"]);
@@ -76,7 +77,7 @@ async function main(){
   const results:StageResult[]=[];
   let lastPhase:Phase|null=null;
   let canonicalSnapshotTaken=false;
-  log("shark_scout_pipeline_started",{version:3,stageCount:stages.length,budgetMs:PIPELINE_BUDGET_MS,finalizeReserveMs:FINALIZE_RESERVE_MS});
+  log("shark_scout_pipeline_started",{version:4,stageCount:stages.length,budgetMs:PIPELINE_BUDGET_MS,finalizeReserveMs:FINALIZE_RESERVE_MS});
 
   const emergencyRestore=async(reason:string)=>{
     if(!canonicalSnapshotTaken)return true;
