@@ -1,0 +1,41 @@
+import fs from "node:fs";
+import path from "node:path";
+import zlib from "node:zlib";
+import { sha256, type EventEnvelope } from "./prospective_ab_lab.js";
+
+export type ReliabilitySeverity="OK"|"WARN"|"ERROR";
+export type ReliabilityIssue={code:string;severity:ReliabilitySeverity;detail:string;wallet?:string;file?:string};
+type ProviderStat={seen:number;first:number;errors:number;lastSeenAt:string|null;latencySamples:number[]};
+type WalletStat={lastSeenAt:string|null;lastSlot:number|null;lastSignature:string|null;events:number};
+type ReliabilityState={schemaVersion:number;startedAt:string;lastAuditAt:string|null;lastReconcileAt:string|null;lastReplayAt:string|null;manifestHash:string;manifestDrift:number;audits:number;integrityErrors:number;replayRecovered:number;rotations:number;providers:Record<string,ProviderStat>;wallets:Record<string,WalletStat>};
+
+const iso=()=>new Date().toISOString();
+function median(xs:number[]){if(!xs.length)return null;const a=[...xs].sort((x,y)=>x-y);const m=Math.floor(a.length/2);return a.length%2?a[m]:(a[m-1]+a[m])/2;}
+function atomicJson(p:string,v:unknown){fs.mkdirSync(path.dirname(p),{recursive:true});const t=`${p}.tmp`;fs.writeFileSync(t,JSON.stringify(v,null,2));fs.renameSync(t,p);}
+function readJson<T>(p:string,fallback:T):T{try{return JSON.parse(fs.readFileSync(p,"utf8"));}catch{return fallback;}}
+
+export class PackageCReliability {
+ private statePath:string; private auditPath:string; private manifestPath:string; private archiveDir:string; private spoolPath:string; private state:ReliabilityState;
+ constructor(private root:string,private manifestHash:string,private trackedWallets:Set<string>){
+  this.statePath=path.join(root,"package-c-state.json");this.auditPath=path.join(root,"package-c-audits.jsonl");this.manifestPath=path.join(root,"package-c-manifest.json");this.archiveDir=path.join(root,"archive");this.spoolPath=path.join(path.dirname(root),"alchemy-prospective-events.jsonl");
+  const base:ReliabilityState={schemaVersion:1,startedAt:iso(),lastAuditAt:null,lastReconcileAt:null,lastReplayAt:null,manifestHash,manifestDrift:0,audits:0,integrityErrors:0,replayRecovered:0,rotations:0,providers:{},wallets:{}};
+  this.state={...base,...readJson(this.statePath,base),providers:readJson(this.statePath,base).providers??{},wallets:readJson(this.statePath,base).wallets??{}};
+  this.checkManifest();this.persist();
+ }
+ private persist(){atomicJson(this.statePath,this.state);}
+ private checkManifest(){const prior=readJson<{hash?:string}>(this.manifestPath,{});if(prior.hash&&prior.hash!==this.manifestHash)this.state.manifestDrift++;atomicJson(this.manifestPath,{hash:this.manifestHash,updatedAt:iso()});this.state.manifestHash=this.manifestHash;}
+ observe(e:EventEnvelope,firstProvider=false){const k=`${e.provider}:${e.transport}`;const p=this.state.providers[k]??{seen:0,first:0,errors:0,lastSeenAt:null,latencySamples:[]};p.seen++;if(firstProvider)p.first++;p.lastSeenAt=e.receivedAt;if(e.providerCreatedAt){const lag=Date.parse(e.receivedAt)-Date.parse(e.providerCreatedAt);if(Number.isFinite(lag)&&lag>=0)p.latencySamples=[...p.latencySamples.slice(-199),lag];}this.state.providers[k]=p;
+  const w=this.state.wallets[e.wallet]??{lastSeenAt:null,lastSlot:null,lastSignature:null,events:0};w.lastSeenAt=e.receivedAt;w.lastSlot=e.slot;w.lastSignature=e.signature;w.events++;this.state.wallets[e.wallet]=w;this.persist();}
+ providerError(provider:string){const p=this.state.providers[provider]??{seen:0,first:0,errors:0,lastSeenAt:null,latencySamples:[]};p.errors++;this.state.providers[provider]=p;this.persist();}
+ reconcileCompleted(){this.state.lastReconcileAt=iso();this.persist();}
+ private inspectJsonl(file:string,maxLines=20000){const issues:ReliabilityIssue[]=[];if(!fs.existsSync(file))return issues;let lines:string[]=[];try{lines=fs.readFileSync(file,"utf8").split("\n").filter(Boolean);}catch(err){return[{code:"FILE_READ_ERROR",severity:"ERROR",detail:String(err),file}]};const start=Math.max(0,lines.length-maxLines);for(let i=start;i<lines.length;i++){try{JSON.parse(lines[i]);}catch{issues.push({code:"JSONL_CORRUPT_LINE",severity:"ERROR",detail:`line ${i+1}`,file});if(issues.length>=20)break;}}return issues;}
+ private cursorIssues(now=Date.now()){const issues:ReliabilityIssue[]=[];const p=path.join(this.root,"reconcile-cursors.json");const cursors=readJson<Record<string,{checkedAt?:string;signature?:string|null}>>(p,{});for(const w of this.trackedWallets){const c=cursors[w];if(!c){issues.push({code:"CURSOR_MISSING",severity:"WARN",detail:"No reconciliation cursor",wallet:w});continue;}const age=now-Date.parse(c.checkedAt??"");if(!Number.isFinite(age)||age>180000)issues.push({code:"CURSOR_STALE",severity:"WARN",detail:`cursor age ${Math.round(age/1000)}s`,wallet:w});}return issues;}
+ private eventGapIssues(now=Date.now()){const issues:ReliabilityIssue[]=[];for(const w of this.trackedWallets){const s=this.state.wallets[w];if(!s?.lastSeenAt)continue;const age=now-Date.parse(s.lastSeenAt);if(age>6*3600000)issues.push({code:"EVENT_GAP_6H",severity:"WARN",detail:`no observed event for ${Math.round(age/3600000)}h`,wallet:w});}return issues;}
+ private providerScores(){const out:Record<string,unknown>={};for(const [k,p] of Object.entries(this.state.providers)){const errorRate=p.seen+p.errors? p.errors/(p.seen+p.errors):0;const medianLagMs=median(p.latencySamples);const freshnessMs=p.lastSeenAt?Date.now()-Date.parse(p.lastSeenAt):null;const score=Math.max(0,100-Math.round(errorRate*60)-(medianLagMs===null?10:Math.min(20,Math.round(medianLagMs/500)))-(freshnessMs!==null&&freshnessMs>3600000?10:0));out[k]={score,seen:p.seen,first:p.first,errors:p.errors,errorRate,medianLagMs,lastSeenAt:p.lastSeenAt};}return out;}
+ audit(extraFiles:string[]=[]){this.checkManifest();const issues:ReliabilityIssue[]=[...this.cursorIssues(),...this.eventGapIssues()];for(const f of [this.spoolPath,path.join(this.root,"event-envelopes.jsonl"),path.join(this.root,"flight-recorder.jsonl"),path.join(this.root,"experiment-results.jsonl"),...extraFiles])issues.push(...this.inspectJsonl(f));if(this.state.manifestDrift>0)issues.push({code:"MANIFEST_DRIFT_HISTORY",severity:"WARN",detail:`manifest changed ${this.state.manifestDrift} time(s)`});
+  const report={schemaVersion:1,auditId:sha256(`${iso()}:${this.manifestHash}:${this.state.audits}`),at:iso(),manifestHash:this.manifestHash,issues,providerScores:this.providerScores(),slo:{reconcileFresh:!issues.some(x=>x.code==="CURSOR_STALE"||x.code==="CURSOR_MISSING"),integrityClean:!issues.some(x=>x.severity==="ERROR"),manifestStable:this.state.manifestDrift===0},trackedWallets:this.trackedWallets.size};
+  fs.mkdirSync(path.dirname(this.auditPath),{recursive:true});fs.appendFileSync(this.auditPath,JSON.stringify(report)+"\n");this.state.lastAuditAt=report.at;this.state.audits++;this.state.integrityErrors+=issues.filter(x=>x.severity==="ERROR").length;this.persist();return report;}
+ recoverSpool(onRecord:(record:any)=>void){if(!fs.existsSync(this.spoolPath))return 0;let n=0;for(const line of fs.readFileSync(this.spoolPath,"utf8").split("\n").filter(Boolean)){try{const r=JSON.parse(line);if(r?.signatureVerified===true){onRecord(r);n++;}}catch{}}this.state.lastReplayAt=iso();this.state.replayRecovered+=n;this.persist();return n;}
+ compact(maxBytes=50*1024*1024){fs.mkdirSync(this.archiveDir,{recursive:true});let rotated=0;for(const file of [this.spoolPath,path.join(this.root,"event-envelopes.jsonl"),path.join(this.root,"flight-recorder.jsonl"),path.join(this.root,"execution-decay.jsonl"),path.join(this.root,"experiment-results.jsonl")]){try{const st=fs.statSync(file);if(st.size<maxBytes)continue;const stamp=new Date().toISOString().replace(/[:.]/g,"-");const dest=path.join(this.archiveDir,`${path.basename(file)}.${stamp}.gz`);fs.writeFileSync(dest,zlib.gzipSync(fs.readFileSync(file),{level:6}));fs.truncateSync(file,0);rotated++;}catch{}}this.state.rotations+=rotated;this.persist();return rotated;}
+ status(){return{...this.state,providerScores:this.providerScores(),trackedWallets:this.trackedWallets.size};}
+}
