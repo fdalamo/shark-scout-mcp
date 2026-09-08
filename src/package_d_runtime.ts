@@ -13,7 +13,10 @@ const root=path.join(DATA_DIR,"prospective-ab");
 const governance=new PackageDGovernance(root,MANIFEST_HASH,LIVE_MIRRORS,RESEARCH_COHORT,CONTROL_COHORT);
 const everyMs=Math.max(60000,Number(process.env.PACKAGE_D_EVALUATE_MS??300000));
 
-function run(){try{const s=governance.snapshot();console.log(JSON.stringify({level:"info",event:"shark_scout_package_d_evaluated",at:s.at,policyHash:s.policyHash,manifestHash:s.manifestHash,summary:s.summary,controls:s.controls,advisoryOnly:true}));}catch(err){console.error(JSON.stringify({level:"error",event:"shark_scout_package_d_error",error:String(err)}));}}
+// This service owns realtime ingestion/reliability telemetry. It does not own promotion/demotion decisions:
+// the hourly odin_governance_snapshot joins canonical replay, Paper Odin, exact follower attribution,
+// cap counterfactuals and controls on the main persistent volume and is the authoritative research view.
+function run(){try{const s=governance.snapshot();console.log(JSON.stringify({level:"info",event:"shark_scout_realtime_governance_diagnostic",at:s.at,policyHash:s.policyHash,manifestHash:s.manifestHash,summary:s.summary,controls:s.controls,authoritativeForPromotion:false,authoritativeForLiveMutation:false,advisoryOnly:true}));}catch(err){console.error(JSON.stringify({level:"error",event:"shark_scout_realtime_governance_diagnostic_error",error:String(err)}));}}
 
 run();setInterval(run,everyMs);
-console.log(JSON.stringify({level:"info",event:"shark_scout_package_d_started",dataDir:DATA_DIR,manifestHash:MANIFEST_HASH,evaluateEveryMs:everyMs,advisoryOnly:true,odinMutation:false,capitalMutation:false,mirrorMutation:false}));
+console.log(JSON.stringify({level:"info",event:"shark_scout_package_d_started",dataDir:DATA_DIR,manifestHash:MANIFEST_HASH,evaluateEveryMs:everyMs,mode:"REALTIME_DIAGNOSTIC_ONLY",authoritativeHourlyGovernance:"odin_governance_snapshot",authoritativeForPromotion:false,advisoryOnly:true,odinMutation:false,capitalMutation:false,mirrorMutation:false}));
