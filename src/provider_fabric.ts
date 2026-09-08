@@ -30,6 +30,12 @@ function health(s:State,p:ProviderName){return s.providers[p] ||= {requests:0,su
 async function callProvider(p:ProviderName,method:string,params:unknown[]){const url=URLS[p];if(!url)throw new Error(`${p}:not_configured`);const wait=Math.max(0,(nextAt[p]||0)-Date.now());if(wait)await sleep(wait);nextAt[p]=Date.now()+Math.max(25,MIN_INTERVAL[p]||100);const c=new AbortController(),t=setTimeout(()=>c.abort(),TIMEOUT_MS),started=Date.now();try{const r=await fetch(url,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({jsonrpc:"2.0",id:rpcId++,method,params}),signal:c.signal});const text=await r.text();if(!r.ok){const e:any=new Error(`${p}:${r.status}:${text.slice(0,180)}`);e.status=r.status;throw e;}const body=text?JSON.parse(text):null;if(body?.error)throw new Error(`${p}:rpc:${JSON.stringify(body.error).slice(0,220)}`);return {result:body?.result,latencyMs:Date.now()-started};}finally{clearTimeout(t);}}
 export function providerFabricEnabled(){return ENABLED;}
 export function configuredRpcProviders(){return ORDER.filter(p=>Boolean(URLS[p]));}
+export async function smokeProbeProvider(p:ProviderName,method="getLatestBlockhash",params:unknown[]=[{commitment:"confirmed"}]){
+  if(!URLS[p])throw new Error(`${p}:not_configured`);
+  const state=await readState();const h=health(state,p);h.requests++;h.lastUsedAt=new Date().toISOString();
+  try{const x=await callProvider(p,method,params);h.successes++;h.latencyMsTotal+=x.latencyMs;await saveState(state);return {provider:p,result:x.result,latencyMs:x.latencyMs};}
+  catch(e:any){h.failures++;if(e?.status===429)h.rateLimited++;h.lastError=String(e).slice(0,500);await saveState(state);throw e;}
+}
 export async function routedRpc(method:string,params:unknown[]=[],opts:{preferred?:ProviderName[];verify?:boolean}={}){
   if(!ENABLED)throw new Error("provider_fabric_disabled");
   const state=await readState();const candidates=(opts.preferred?.length?opts.preferred:ORDER).filter(p=>Boolean(URLS[p]));if(!candidates.length)throw new Error("provider_fabric_no_rpc_provider");let last:unknown;
