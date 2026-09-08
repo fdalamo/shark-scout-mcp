@@ -1,0 +1,28 @@
+import assert from "node:assert/strict";
+import { tradeLevelFragility } from "./odin_fragility_math.js";
+
+const mk=(net:number,i:number)=>({mint:`T${i%4}`,buyTimestamp:new Date(1_700_000_000_000+i*120_000).toISOString(),sellTimestamp:new Date(1_700_000_060_000+i*120_000).toISOString(),followerNetSol:net,stress50NetSol:net*.5});
+const pnl=[.10,.05,-.02,.04,-.01,.03,.02,-.015,.025,.01,.06,-.02,.03,.015,-.01,.02,.025,-.005,.04,.01,.03,-.01,.02,.015,.01];
+const a=tradeLevelFragility("SELFTEST",pnl.map(mk));
+assert.equal(a.trades,25);
+assert.ok(Math.abs(a.netSol-pnl.reduce((x,y)=>x+y,0))<1e-12);
+assert.ok((a.medianTradeSol??0)>0);
+assert.ok((a.profitFactor??0)>1);
+assert.ok(a.maxDrawdownSol>=0);
+assert.ok((a.largestWinnerShare??0)>0);
+assert.ok(a.netExLargestWinnerSol<a.netSol);
+assert.ok(a.netExTop3Sol<=a.netExLargestWinnerSol);
+assert.ok(a.netExTop5PctSol<=a.netExLargestWinnerSol);
+assert.equal(a.independentTokens,4);
+assert.ok(a.rolling10&&a.rolling10.windows===16);
+assert.ok(a.rolling20&&a.rolling20.windows===6);
+assert.ok((a.bootstrapProbabilityPositiveExpectancy??0)>.8);
+assert.equal(a.stress50.trades,25);
+assert.ok(Math.abs((a.stress50.retention??0)-.5)<1e-12);
+const b=tradeLevelFragility("SELFTEST",pnl.map(mk));
+assert.equal(a.bootstrapProbabilityPositiveExpectancy,b.bootstrapProbabilityPositiveExpectancy,"bootstrap must be deterministic");
+const empty=tradeLevelFragility("EMPTY",[]);
+assert.equal(empty.trades,0);
+assert.equal(empty.netSol,0);
+assert.equal(empty.bootstrapProbabilityPositiveExpectancy,null);
+console.log(JSON.stringify({event:"odin_fragility_selftest_passed",trades:a.trades,bootstrap:a.bootstrapProbabilityPositiveExpectancy,maxDrawdownSol:a.maxDrawdownSol}));
