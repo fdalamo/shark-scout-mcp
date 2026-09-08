@@ -21,7 +21,7 @@ const stages:Stage[]=[
   {name:"outcome_miner_v2",phase:"DISCOVERY",args:["dist/outcome_miner_v2.js"],timeoutMs:10*MINUTE,continueOnFailure:true},
   {name:"harvest_scout",phase:"DISCOVERY",args:["dist/harvest_scout.js"],timeoutMs:12*MINUTE,continueOnFailure:true},
 
-  // Snapshot/restore bracket is kept atomic from the supervisor's perspective.
+  // Snapshot/restore bracket protects the mutating Deep Dive + Gauntlet work only.
   {name:"canonical_snapshot_pre",phase:"CANONICAL",args:["dist/canonical_state_guard.js","snapshot"],timeoutMs:2*MINUTE},
   {name:"deep_dive",phase:"CANONICAL",args:["dist/deep_dive_reinvestigate.js"],timeoutMs:10*MINUTE,continueOnFailure:true},
   {name:"gauntlet_v6",phase:"CANONICAL",args:["dist/gauntlet_v6.js"],timeoutMs:10*MINUTE,continueOnFailure:true,env:{VYBE_API_KEY:""}},
@@ -38,6 +38,8 @@ const stages:Stage[]=[
   {name:"evidence_funnel",phase:"FINALIZE",args:["dist/evidence_funnel.js"],timeoutMs:3*MINUTE},
   {name:"engine_intelligence",phase:"FINALIZE",args:["dist/engine_intelligence.js"],timeoutMs:3*MINUTE}
 ];
+
+const protectedCanonicalStages=new Set(["deep_dive","gauntlet_v6","canonical_restore"]);
 
 function log(event:string,extra:Record<string,unknown>={}){
   console.log(JSON.stringify({level:"info",event,at:new Date().toISOString(),...extra}));
@@ -101,8 +103,9 @@ async function main(){
       const skipped:StageResult={name:stage.name,phase:stage.phase,status:"SKIPPED_BUDGET",durationMs:0,exitCode:null,signal:null};
       results.push(skipped);log("shark_scout_stage_finished",skipped);continue;
     }
-    // If snapshot was not taken, skip mutation/reconstruction stages that assume the bracket.
-    if(stage.phase==="CANONICAL"&&stage.name!=="canonical_snapshot_pre"&&!canonicalSnapshotTaken){
+    // Only the mutating snapshot-protected stages require the pre-snapshot to remain open.
+    // Replay/selection/overlay run after restore by design and must not be suppressed here.
+    if(protectedCanonicalStages.has(stage.name)&&!canonicalSnapshotTaken){
       const skipped:StageResult={name:stage.name,phase:stage.phase,status:"SKIPPED_BUDGET",durationMs:0,exitCode:null,signal:null};
       results.push(skipped);log("shark_scout_stage_finished",skipped);continue;
     }
