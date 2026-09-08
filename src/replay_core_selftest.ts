@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { replayEnhancedRows, USDC } from "./replay_core.js";
+import { compareCanonicalPriority } from "./canonical_priority.js";
 
 const W="Wallet111111111111111111111111111111111111";
 const T="Token1111111111111111111111111111111111111";
@@ -46,4 +47,14 @@ assert.equal(f.raw.trades,1);
 assert.equal(f.trusted.trades,0);
 assert.equal(f.diagnostics.economicOutliers,1);
 
-console.log(JSON.stringify({event:"replay_core_selftest_passed",cases:6}));
+// Canonical scheduling: live/explicit priority beats backlog; within ordinary backlog,
+// partially reconstructed wallets nearest completion beat zero-evidence wallets.
+const base={contexts:2,coverage:.8,med:7200,canonicalComplete:false};
+const ordered=[
+  {address:"zero",closed:10,canonicalTrades:0,priorityTier:0,...base},
+  {address:"near",closed:20,canonicalTrades:18,priorityTier:0,...base},
+  {address:"live",closed:50,canonicalTrades:0,priorityTier:3,...base}
+].sort(compareCanonicalPriority);
+assert.deepEqual(ordered.map(x=>x.address),["live","near","zero"]);
+
+console.log(JSON.stringify({event:"replay_core_selftest_passed",cases:7}));
