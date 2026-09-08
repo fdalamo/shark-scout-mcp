@@ -19,7 +19,7 @@ const stages:Stage[]=[
 
   {name:"dune_alpha",phase:"DISCOVERY",args:["dist/dune_alpha_runner.js"],timeoutMs:3*MINUTE,continueOnFailure:true},
   {name:"outcome_miner_v2",phase:"DISCOVERY",args:["dist/outcome_miner_v2.js"],timeoutMs:10*MINUTE,continueOnFailure:true},
-  {name:"harvest_scout",phase:"DISCOVERY",args:["dist/harvest_scout.js"],timeoutMs:12*MINUTE,continueOnFailure:true},
+  {name:"harvest_scout",phase:"DISCOVERY",args:["dist/harvest_scout_fabric.js"],timeoutMs:12*MINUTE,continueOnFailure:true},
 
   // Snapshot/restore bracket protects the mutating Deep Dive + Gauntlet work only.
   {name:"canonical_snapshot_pre",phase:"CANONICAL",args:["dist/canonical_state_guard.js","snapshot"],timeoutMs:2*MINUTE},
