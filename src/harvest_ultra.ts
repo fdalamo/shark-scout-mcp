@@ -79,7 +79,7 @@ function upsert(state:State,row:any,mint:string){const a=walletAddress(row);if(!
 
 export async function runHarvest(){
   const startedAt=now(),state=await loadState(),before=Object.keys(state.wallets).length,providerErrors:string[]=[];
-  let raw=0,dupes=0,screened=0,invalid=0,tagRejected=0,profiled=0,unknown=0,cacheWrites=0,cachedRows=0;
+  let raw=0,dupes=0,screened=0,invalid=0,tagRejected=0,profiled=0,unknown=0,profileFailures=0,cacheWrites=0,cachedRows=0;
   let tokens:string[]=[];
   try{tokens=await trending();}catch(e){providerErrors.push(`birdeye_trending:${String(e)}`);}
   for(const mint of tokens){const t=now(),old=state.tokens[mint];state.tokens[mint]=old?{...old,lastSeen:t,providers:uniq([...(old.providers||[]),"birdeye"]),hits:(old.hits||0)+1}:{firstSeen:t,lastSeen:t,providers:["birdeye"],hits:1};try{for(const row of await topTraders(mint)){raw++;if(!upsert(state,row,mint))dupes++;}}catch(e){providerErrors.push(`birdeye_top_traders:${mint}:${String(e)}`);}}
@@ -97,16 +97,30 @@ export async function runHarvest(){
     return score(b)-score(a);
   }).slice(0,PROFILE_LIMIT);
   const selectedByTier:Record<ProfileTier,number>={NEW:0,HOT:0,WARM:0,UNKNOWN:0,COLD:0};
-  for(const w of profileTargets){const info=profileDueInfo(w);selectedByTier[info.tier]++;const rows=await heliusRecent(w.address),h=summarizeHelius(rows);w.lastProfiledAt=now();w.profile={...(w.profile||{}),heliusRecent:h,profileScheduler:{tier:info.tier,ttlMinutes:info.ttlMinutes,profiledAt:w.lastProfiledAt}};if(rows){cachedRows+=await writeWalletCache(w.address,rows,w.lastProfiledAt);cacheWrites++;}if(h){w.status="PROFILED";delete w.rejectionReason;profiled++;}else{w.status="UNKNOWN";w.rejectionReason="helius_profile_unavailable";unknown++;}}
+  for(const w of profileTargets){
+    const info=profileDueInfo(w),attemptedAt=now();selectedByTier[info.tier]++;
+    const rows=await heliusRecent(w.address),h=summarizeHelius(rows);
+    if(rows){
+      w.lastProfiledAt=attemptedAt;
+      w.profile={...(w.profile||{}),heliusRecent:h,profileScheduler:{tier:info.tier,ttlMinutes:info.ttlMinutes,profiledAt:attemptedAt,attemptedAt,status:"SUCCESS"}};
+      cachedRows+=await writeWalletCache(w.address,rows,attemptedAt);cacheWrites++;
+      w.status="PROFILED";delete w.rejectionReason;profiled++;
+    }else{
+      profileFailures++;unknown++;
+      w.profile={...(w.profile||{}),profileScheduler:{...(w.profile?.profileScheduler||{}),tier:info.tier,ttlMinutes:info.ttlMinutes,attemptedAt,status:"UNKNOWN_PROVIDER_FAILURE"}};
+      w.status="UNKNOWN";w.rejectionReason="helius_profile_unavailable";
+      providerErrors.push(`helius_profile:${w.address}:unavailable`);
+    }
+  }
 
   const eligibleAfter=Object.values(state.wallets).filter(w=>["CHEAP_PASS","PROFILED","UNKNOWN"].includes(w.status));
   const tierPopulationAfter=tierBreakdown(eligibleAfter),dueAfter=tierBreakdown(eligibleAfter,true);
   const dueBeforeTotal=Object.values(dueBefore).reduce((a,b)=>a+b,0),dueAfterTotal=Object.values(dueAfter).reduce((a,b)=>a+b,0);
   const cachePruned=await pruneCacheDir(),total=Object.keys(state.wallets).length,cross=Object.values(state.wallets).filter(w=>(w.tokens?.length||0)>=2).length,rejected=Object.values(state.wallets).filter(w=>w.status==="REJECTED").length,rawRemaining=Object.values(state.wallets).filter(w=>w.status==="RAW").length;
-  const telemetry={startedAt,finishedAt:now(),birdeyeDiscoveryEnabled:BIRDEYE_DISCOVERY_ENABLED,tokensExamined:tokens.length,rawWalletHits:raw,newUniqueWallets:Math.max(total-before,0),duplicates:dupes,cheapScreened:screened,invalidEntities:invalid,tagRejected,profiled,unknown,cumulativeUniqueWallets:total,cumulativeRejectedWallets:rejected,crossTokenWallets:cross,rawRemaining,profileDueRemaining:dueAfterTotal,profileStaleMinutes:PROFILE_STALE_MINUTES,profileTtlsMinutes:{hot:PROFILE_STALE_MINUTES,warm:PROFILE_WARM_MINUTES,unknown:PROFILE_UNKNOWN_MINUTES,cold:PROFILE_COLD_MINUTES},profileBacklog:{tierPopulationBefore,dueBefore:dueBeforeTotal,dueBeforeByTier:dueBefore,selected:profileTargets.length,selectedByTier,dueAfter:dueAfterTotal,dueAfterByTier:dueAfter,tierPopulationAfter,netDueDelta:dueAfterTotal-dueBeforeTotal},providerWork:{rpcEntityChecks:screened,heliusProfileRequests:profileTargets.length,birdeyeDiscoveryCallsApprox:tokens.length?1+tokens.length:0},heliusCacheWrites:cacheWrites,heliusCachedRows:cachedRows,heliusCachePruned:cachePruned,cacheMode:"per_wallet_compact_v2",providerErrors};
+  const telemetry={startedAt,finishedAt:now(),birdeyeDiscoveryEnabled:BIRDEYE_DISCOVERY_ENABLED,tokensExamined:tokens.length,rawWalletHits:raw,newUniqueWallets:Math.max(total-before,0),duplicates:dupes,cheapScreened:screened,invalidEntities:invalid,tagRejected,profiled,unknown,profileFailures,cumulativeUniqueWallets:total,cumulativeRejectedWallets:rejected,crossTokenWallets:cross,rawRemaining,profileDueRemaining:dueAfterTotal,profileStaleMinutes:PROFILE_STALE_MINUTES,profileTtlsMinutes:{hot:PROFILE_STALE_MINUTES,warm:PROFILE_WARM_MINUTES,unknown:PROFILE_UNKNOWN_MINUTES,cold:PROFILE_COLD_MINUTES},profileBacklog:{tierPopulationBefore,dueBefore:dueBeforeTotal,dueBeforeByTier:dueBefore,selected:profileTargets.length,selectedByTier,dueAfter:dueAfterTotal,dueAfterByTier:dueAfter,tierPopulationAfter,netDueDelta:dueAfterTotal-dueBeforeTotal},providerWork:{rpcEntityChecks:screened,heliusProfileRequests:profileTargets.length,heliusProfileSuccesses:profiled,heliusProfileFailures:profileFailures,birdeyeDiscoveryCallsApprox:tokens.length?1+tokens.length:0},heliusCacheWrites:cacheWrites,heliusCachedRows:cachedRows,heliusCachePruned:cachePruned,cacheMode:"per_wallet_compact_v2",providerErrors};
   state.updatedAt=now();state.runs=[...state.runs.slice(-199),telemetry];await atomicSave(STATE_PATH,state);
   const top=Object.values(state.wallets).filter(w=>w.status==="PROFILED").sort((a,b)=>score(b)-score(a)).slice(0,50).map(w=>({address:w.address,status:w.status,profileTier:profileTier(w),profileTtlMinutes:profileTtlMinutes(w),uniqueTokensSeen:w.tokens?.length||0,rediscoveryCount:w.rediscoveryCount,providers:w.providers,lanes:w.lanes,profile:w.profile}));
-  const report={schemaVersion:9,generatedAt:now(),telemetry,note:"Harvest uses a conservative evidence-tier scheduler: HOT requires corroborating evidence (provider convergence, cross-token recurrence, rediscovery, or curated-quality evidence) rather than a single common discovery lane. WARM retains useful but weaker evidence; ordinary profiles cool to longer refresh intervals. This reduces Helius waste without lowering canonical/Odin promotion standards.",rankedDiscoveryCandidates:top};
+  const report={schemaVersion:10,generatedAt:now(),telemetry,note:"Harvest uses a conservative evidence-tier scheduler. A failed profile attempt is recorded as UNKNOWN but does not advance lastProfiledAt or freshness; only successful Helius evidence refreshes the profile TTL. HOT requires corroborating evidence rather than a single common discovery lane.",rankedDiscoveryCandidates:top};
   await atomicSave(REPORT_PATH,report);return report;
 }
 if(import.meta.url===`file://${process.argv[1]}`)runHarvest().then((r:any)=>console.log(JSON.stringify({event:"shark_scout_harvest_complete",telemetry:r.telemetry,topCandidates:r.rankedDiscoveryCandidates.slice(0,5)}))).catch(e=>{console.error(JSON.stringify({event:"shark_scout_harvest_failed",error:e instanceof Error?e.message:String(e)}));process.exitCode=1;});
