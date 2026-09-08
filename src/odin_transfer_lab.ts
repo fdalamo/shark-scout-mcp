@@ -17,10 +17,14 @@ const MAX_ROWS=Math.max(500,Math.min(20000,Number(process.env.ODIN_TRANSFER_MAX_
 type AnyObj=Record<string,any>;
 type FollowerEvent={signature:string;ts:number|null;mint:string;side:"BUY"|"SELL";qty:number;sol:number;confidence?:string;quote?:string};
 type State={schemaVersion:number;rows:Record<string,TradeResult>;updatedAt?:string};
+type ExecutionDiagnostic={wallet:string;opportunityId:string;mint:string;copySignature:string;sourceBuyTs:number|null;followerBuyTs:number;sourceExitTs:number|null;followerExitTs:number|null;buyLatencySec:number|null;exitLatencySec:number|null;perfectCopyNetSol:number;actualNetSol:number|null;executionGapSol:number|null;executionRetention:number|null;closed:boolean};
 
 function now(){return new Date().toISOString();}
 function n(v:any){const x=Number(v);return Number.isFinite(x)?x:null;}
 function clamp01(v:number){return Math.max(0,Math.min(1,v));}
+function sec(v:any){const x=n(v);if(x!=null&&x>0)return x>1e12?x/1000:x;const p=Date.parse(String(v||""));return Number.isFinite(p)?p/1000:null;}
+function median(xs:number[]){if(!xs.length)return null;const a=[...xs].sort((x,y)=>x-y),m=Math.floor(a.length/2);return a.length%2?a[m]!:(a[m-1]!+a[m]!)/2;}
+function percentile(xs:number[],p:number){if(!xs.length)return null;const a=[...xs].sort((x,y)=>x-y),i=Math.max(0,Math.min(a.length-1,Math.ceil(p*a.length)-1));return a[i]!;}
 async function read(file:string,fallback:any){try{return JSON.parse(await fs.readFile(file,"utf8"));}catch{return fallback;}}
 async function atomic(file:string,data:string){await fs.mkdir(path.dirname(file),{recursive:true});const tmp=`${file}.${process.pid}.tmp`;await fs.writeFile(tmp,data);await fs.rename(tmp,file);}
 function resultId(wallet:string,opportunityId:string,layer:Layer){return sha256(`${wallet}|${opportunityId}|${layer}`);}
@@ -56,6 +60,11 @@ function cohortSets(odin:any,funnel:any){
   return{live,research,controls};
 }
 
+function timingFor(diags:ExecutionDiagnostic[],wallet:string){
+  const x=diags.filter(d=>d.wallet===wallet),buys=x.map(d=>d.buyLatencySec).filter((v):v is number=>v!=null&&v>=0),exits=x.map(d=>d.exitLatencySec).filter((v):v is number=>v!=null&&v>=0),gaps=x.map(d=>d.executionGapSol).filter((v):v is number=>v!=null),ret=x.map(d=>d.executionRetention).filter((v):v is number=>v!=null);
+  return{matchedBuys:x.length,closedActual:x.filter(d=>d.closed).length,buyLatencySec:{n:buys.length,median:median(buys),p95:percentile(buys,.95),max:buys.length?Math.max(...buys):null},exitLatencySec:{n:exits.length,median:median(exits),p95:percentile(exits,.95),max:exits.length?Math.max(...exits):null},executionGapSol:{n:gaps.length,median:median(gaps),total:gaps.length?gaps.reduce((a,b)=>a+b,0):null},executionRetention:{n:ret.length,median:median(ret)}};
+}
+
 function otsFor(rows:TradeResult[],wallet:string,live:boolean){
   const perfect=rows.filter(x=>x.wallet===wallet&&x.layer==="PERFECT_COPY"),sim=rows.filter(x=>x.wallet===wallet&&x.layer==="SIMULATED_ODIN"),actual=rows.filter(x=>x.wallet===wallet&&x.layer==="ACTUAL_ODIN");
   const pm=metrics(perfect),sm=metrics(sim),am=metrics(actual),eligibilityCapture=perfect.length?sim.length/perfect.length:null,actualCapture=sim.length?actual.length/sim.length:null;
@@ -75,13 +84,13 @@ async function main(){
     read(OPPORTUNITY_PATH,{}),read(TRUTH_PATH,{entries:{}}),read(PORTFOLIO_CACHE_PATH,{events:{}}),read(ODIN_PATH,{}),read(FUNNEL_PATH,{}),read(STATE_PATH,{schemaVersion:1,rows:{}})
   ]);
   const state:State={schemaVersion:1,rows:state0?.rows&&typeof state0.rows==="object"?state0.rows:{}};
-  const tmap=truthMap(truth),lots=followerLots(portfolio);let opportunities=0,sourceResolved=0,simulatedResolved=0,actualResolved=0;
+  const tmap=truthMap(truth),lots=followerLots(portfolio),diagnostics:ExecutionDiagnostic[]=[];let opportunities=0,sourceResolved=0,simulatedResolved=0,actualResolved=0,matchedCopyBuys=0;
   for(const mirror of Array.isArray(op?.perMirror)?op.perMirror:[]){
     const wallet=String(mirror?.mirror||"");if(!wallet)continue;
     for(const x of Array.isArray(mirror?.opportunityDetails)?mirror.opportunityDetails:[]){
       const opportunityId=String(x?.opportunityId||"");if(!opportunityId)continue;opportunities++;
       const rt=x?.sourceRoundTrip,roi=n(rt?.sourceRoi),perfectNet=n(rt?.estimatedFollowerNetSol);if(roi==null||perfectNet==null)continue;
-      const eligibleAt=String(x?.sourceBuyAt||new Date(Number(x?.sourceTimestamp||0)*1000).toISOString()),resolvedAt=sourceResolvedAt(x);
+      const eligibleAt=String(x?.sourceBuyAt||new Date(Number(x?.sourceTimestamp||0)*1000).toISOString()),resolvedAt=sourceResolvedAt(x),sourceBuyTs=sec(x?.sourceBuyAt)??sec(x?.sourceTimestamp),sourceExitTs=sec(rt?.finalSellTimestamp);
       addRow(state,{tradeId:resultId(wallet,opportunityId,"SOURCE"),wallet,layer:"SOURCE",netSol:NORMALIZED_SOURCE_SIZE*roi,eligibleAt,resolvedAt,topWinnerKey:String(x?.mint||opportunityId)});
       addRow(state,{tradeId:resultId(wallet,opportunityId,"PERFECT_COPY"),wallet,layer:"PERFECT_COPY",netSol:perfectNet,eligibleAt,resolvedAt,topWinnerKey:String(x?.mint||opportunityId)});sourceResolved++;
       const tv=tmap.get(opportunityId) as AnyObj|undefined;
@@ -89,9 +98,10 @@ async function main(){
         addRow(state,{tradeId:resultId(wallet,opportunityId,"SIMULATED_ODIN"),wallet,layer:"SIMULATED_ODIN",netSol:perfectNet,eligibleAt,resolvedAt,topWinnerKey:String(x?.mint||opportunityId)});simulatedResolved++;
       }
       const copySig=String(x?.copySignature||tv?.copySignature||"");const lot=copySig?lots.get(copySig):undefined;
-      if(lot&&lot.qtyInitial>0&&lot.soldQty>=lot.qtyInitial*.90&&lot.resolvedAt){
-        const actualNet=lot.proceedsSol-lot.costSol;
-        addRow(state,{tradeId:resultId(wallet,opportunityId,"ACTUAL_ODIN"),wallet,layer:"ACTUAL_ODIN",netSol:actualNet,eligibleAt,resolvedAt:lot.resolvedAt,topWinnerKey:String(x?.mint||opportunityId)});actualResolved++;
+      if(lot){
+        matchedCopyBuys++;const closed=lot.qtyInitial>0&&lot.soldQty>=lot.qtyInitial*.90&&!!lot.resolvedAt,actualNet=closed?lot.proceedsSol-lot.costSol:null,followerExitTs=lot.resolvedAt?sec(lot.resolvedAt):null;
+        diagnostics.push({wallet,opportunityId,mint:String(x?.mint||lot.mint),copySignature:copySig,sourceBuyTs,followerBuyTs:lot.ts,sourceExitTs,followerExitTs,buyLatencySec:sourceBuyTs==null?null:lot.ts-sourceBuyTs,exitLatencySec:sourceExitTs==null||followerExitTs==null?null:followerExitTs-sourceExitTs,perfectCopyNetSol:perfectNet,actualNetSol:actualNet,executionGapSol:actualNet==null?null:actualNet-perfectNet,executionRetention:actualNet==null||perfectNet===0?null:actualNet/perfectNet,closed});
+        if(closed&&actualNet!=null){addRow(state,{tradeId:resultId(wallet,opportunityId,"ACTUAL_ODIN"),wallet,layer:"ACTUAL_ODIN",netSol:actualNet,eligibleAt,resolvedAt:lot.resolvedAt!,topWinnerKey:String(x?.mint||opportunityId)});actualResolved++;}
       }
     }
   }
@@ -100,9 +110,11 @@ async function main(){
   state.updatedAt=now();
   await atomic(STATE_PATH,JSON.stringify(state));await atomic(RESULTS_PATH,rows.map(x=>JSON.stringify(x)).join("\n")+(rows.length?"\n":""));
   const cohorts=cohortSets(odin,funnel),wallets=[...new Set(rows.map(x=>x.wallet))].sort();
-  const perWallet=wallets.map(wallet=>({wallet,role:cohorts.live.has(wallet)?"LIVE":cohorts.research.has(wallet)?"RESEARCH":cohorts.controls.has(wallet)?"CONTROL":"OBSERVED",ots:otsFor(rows,wallet,cohorts.live.has(wallet))})).sort((a,b)=>b.ots.score-a.ots.score);
+  const perWallet=wallets.map(wallet=>({wallet,role:cohorts.live.has(wallet)?"LIVE":cohorts.research.has(wallet)?"RESEARCH":cohorts.controls.has(wallet)?"CONTROL":"OBSERVED",ots:otsFor(rows,wallet,cohorts.live.has(wallet)),execution:timingFor(diagnostics,wallet)})).sort((a,b)=>b.ots.score-a.ots.score);
   const layerTotals=Object.fromEntries((["SOURCE","PERFECT_COPY","SIMULATED_ODIN","ACTUAL_ODIN"] as Layer[]).map(layer=>[layer,metrics(rows.filter(x=>x.layer===layer))]));
-  const report={schemaVersion:1,event:"shark_scout_odin_transfer_lab_complete",startedAt,finishedAt:now(),opportunities,sourceResolved,simulatedResolved,actualResolved,totalTradeRows:rows.length,cohorts:{live:[...cohorts.live].sort(),research:[...cohorts.research].sort(),controls:[...cohorts.controls].sort()},layerTotals,perWallet,methodology:{source:"Source ROI normalized to configured source-size SOL.",perfectCopy:"Source round-trip replayed at Odin-sized economics from opportunity audit.",simulatedOdin:"Perfect-copy result included only when Paper Odin classified the source opportunity ODIN_ELIGIBLE.",actualOdin:"Follower wallet FIFO lot reconstructed from exact matched copy signature and on-chain SOL deltas; emitted only after >=90% of that lot is sold.",ots:"Sample-adjusted geometric transferability score. Advisory research ranking only; never mutates Odin."},guardrails:{advisoryOnly:true,odinMutation:false,capitalMutation:false,mirrorMutation:false},hash:sha256(stableJson(rows))};
+  const allBuys=diagnostics.map(d=>d.buyLatencySec).filter((v):v is number=>v!=null&&v>=0),allExits=diagnostics.map(d=>d.exitLatencySec).filter((v):v is number=>v!=null&&v>=0),allGaps=diagnostics.map(d=>d.executionGapSol).filter((v):v is number=>v!=null);
+  const executionSummary={matchedCopyBuys,closedActual:diagnostics.filter(d=>d.closed).length,buyLatencySec:{n:allBuys.length,median:median(allBuys),p95:percentile(allBuys,.95),max:allBuys.length?Math.max(...allBuys):null},exitLatencySec:{n:allExits.length,median:median(allExits),p95:percentile(allExits,.95),max:allExits.length?Math.max(...allExits):null},executionGapSol:{n:allGaps.length,total:allGaps.length?allGaps.reduce((a,b)=>a+b,0):null,median:median(allGaps)}};
+  const report={schemaVersion:2,event:"shark_scout_odin_transfer_lab_complete",startedAt,finishedAt:now(),opportunities,sourceResolved,simulatedResolved,matchedCopyBuys,actualResolved,totalTradeRows:rows.length,cohorts:{live:[...cohorts.live].sort(),research:[...cohorts.research].sort(),controls:[...cohorts.controls].sort()},layerTotals,executionSummary,perWallet,executionDiagnostics:diagnostics,methodology:{source:"Source ROI normalized to configured source-size SOL.",perfectCopy:"Source round-trip replayed at Odin-sized economics from opportunity audit.",simulatedOdin:"Perfect-copy result included only when Paper Odin classified the source opportunity ODIN_ELIGIBLE.",actualOdin:"Follower wallet FIFO lot reconstructed from exact matched copy signature and on-chain SOL deltas; emitted only after >=90% of that lot is sold.",latency:"Buy latency is source-buy timestamp to matched follower-buy timestamp; exit latency is source final-sell timestamp to follower lot closure. Negative values remain visible diagnostically and are excluded from aggregate latency summaries.",executionGap:"ACTUAL_ODIN net SOL minus PERFECT_COPY net SOL for the same exact matched opportunity.",ots:"Sample-adjusted geometric transferability score. Advisory research ranking only; never mutates Odin."},guardrails:{advisoryOnly:true,odinMutation:false,capitalMutation:false,mirrorMutation:false},hash:sha256(stableJson(rows))};
   await atomic(OUT_PATH,JSON.stringify(report));console.log(JSON.stringify(report));
 }
 main().catch(e=>{console.error(JSON.stringify({event:"shark_scout_odin_transfer_lab_failed",error:e instanceof Error?e.message:String(e)}));process.exitCode=1;});
