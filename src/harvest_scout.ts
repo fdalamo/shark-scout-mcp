@@ -8,6 +8,8 @@ import { runHarvest } from "./harvest_ultra.js";
 const CIELO_KEY = process.env.CIELO_API_KEY?.trim();
 const BIRDEYE_KEY = process.env.BIRDEYE_API_KEY?.trim();
 const STATE_PATH = process.env.SCOUT_STATE_PATH || "/data/shark-state.json";
+const REPORT_PATH = process.env.SCOUT_REPORT_PATH || "/data/latest-harvest.json";
+const HARVEST_MARKER_PATH = process.env.SCOUT_HARVEST_MARKER_PATH || "/data/harvest-marker-state.json";
 const TAG_CACHE_PATH = process.env.SCOUT_CIELO_TAG_CACHE_PATH || "/data/cielo-tag-cache.json";
 const TIMEOUT_MS = clamp(Number(process.env.REQUEST_TIMEOUT_MS || 25000), 3000, 60000);
 const TAG_TTL_MS = clamp(Number(process.env.CIELO_TAG_ENRICH_HOURS || 24), 6, 168) * 3600_000;
@@ -20,6 +22,7 @@ const POSITIVE_TAGS = ["human", "gem", "popular", "high win"];
 
 type AnyObj = Record<string, any>;
 type TagCache = { version: 1; wallets: Record<string, { fetchedAt: string; tags: string[] }> };
+type HarvestMarkerState = { schemaVersion: 1; lastEmittedFinishedAt?: string; updatedAt?: string };
 
 function clamp(n: number, min: number, max: number) { return Math.max(min, Math.min(max, Number.isFinite(n) ? Math.floor(n) : min)); }
 function uniq<T>(x: T[]) { return [...new Set(x)]; }
@@ -94,8 +97,59 @@ async function injectCieloDiscovery(state: AnyObj) {
   return { ...d.telemetry, newWallets, bridgeWallets, bridgeCalls, errors: d.errors };
 }
 
+async function recoverPriorHarvestIfNeeded() {
+  const report = await readJson(REPORT_PATH, null);
+  const marker: HarvestMarkerState = await readJson(HARVEST_MARKER_PATH, { schemaVersion: 1 });
+  const finishedAt = report?.telemetry?.finishedAt;
+  if (!finishedAt || marker.lastEmittedFinishedAt === finishedAt) return false;
+  console.log(JSON.stringify({
+    event: "shark_scout_harvest_recovered_previous",
+    recoveredAt: now(),
+    generatedAt: report?.generatedAt ?? null,
+    telemetry: report.telemetry,
+    topCandidates: Array.isArray(report?.rankedDiscoveryCandidates) ? report.rankedDiscoveryCandidates.slice(0, 5) : [],
+    reason: "Previous durable harvest report existed without a matching emitted-marker checkpoint. Recovered from persistent storage; this is not a new harvest run."
+  }));
+  await atomicSave(HARVEST_MARKER_PATH, { schemaVersion: 1, lastEmittedFinishedAt: finishedAt, updatedAt: now() });
+  return true;
+}
+
+function discoveryHealth(dune: any, cielo: any, harvest: any) {
+  const duneErrors = Array.isArray(dune?.errors) ? dune.errors : [];
+  const cieloErrors = Array.isArray(cielo?.errors) ? cielo.errors : [];
+  const harvestErrors = Array.isArray(harvest?.providerErrors) ? harvest.providerErrors : [];
+  const errors = [...duneErrors.map((x: any) => `dune:${String(x)}`), ...cieloErrors.map((x: any) => `cielo:${String(x)}`), ...harvestErrors.map((x: any) => `harvest:${String(x)}`)];
+  const activity = {
+    duneRowsFetched: Number(dune?.rowsFetched || 0),
+    duneBatchAdded: Number(dune?.batchAdded || 0),
+    cieloNewWallets: Number(cielo?.newWallets || 0),
+    cieloBridgeWallets: Number(cielo?.bridgeWallets || 0),
+    birdeyeEnabled: Boolean(harvest?.birdeyeDiscoveryEnabled),
+    birdeyeTokensExamined: Number(harvest?.tokensExamined || 0),
+    birdeyeRawWalletHits: Number(harvest?.rawWalletHits || 0),
+    newUniqueWallets: Number(harvest?.newUniqueWallets || 0),
+    duplicateHits: Number(harvest?.duplicates || 0),
+    cheapScreened: Number(harvest?.cheapScreened || 0),
+    profiled: Number(harvest?.profiled || 0),
+    cumulativeUniqueWallets: Number(harvest?.cumulativeUniqueWallets || 0),
+    crossTokenWallets: Number(harvest?.crossTokenWallets || 0),
+    rawRemaining: Number(harvest?.rawRemaining || 0),
+    profileDueRemaining: Number(harvest?.profileDueRemaining || 0)
+  };
+  return {
+    event: "shark_scout_harvest_health",
+    at: now(),
+    status: errors.length ? "DEGRADED" : "GREEN",
+    activeDiscoveryThisRun: activity.duneRowsFetched > 0 || activity.duneBatchAdded > 0 || activity.cieloNewWallets > 0 || activity.birdeyeTokensExamined > 0 || activity.birdeyeRawWalletHits > 0,
+    activity,
+    errors,
+    note: "GREEN means configured harvesting lanes completed without provider errors; zero additions may be a legitimate not-due/deduped run and is not rewritten as no activity."
+  };
+}
+
 export async function runScoutHarvest() {
   const startedAt = now();
+  await recoverPriorHarvestIfNeeded();
   const state = await readJson(STATE_PATH, { schemaVersion: 6, createdAt: startedAt, updatedAt: startedAt, wallets: {}, tokens: {}, runs: [] });
   const dune = await runDuneDiscoveryStage(state);
   console.log(JSON.stringify(dune));
@@ -103,7 +157,10 @@ export async function runScoutHarvest() {
   const discovery = await injectCieloDiscovery(state);
   state.updatedAt = now(); await atomicSave(STATE_PATH, state);
   console.log(JSON.stringify({ event: "shark_scout_cielo_harvest_stage_complete", startedAt, tagEnrichment, discovery }));
-  await runHarvest();
+  const report = await runHarvest();
+  console.log(JSON.stringify({ event: "shark_scout_harvest_complete", telemetry: report.telemetry, topCandidates: report.rankedDiscoveryCandidates.slice(0, 5) }));
+  console.log(JSON.stringify(discoveryHealth(dune, discovery, report.telemetry)));
+  await atomicSave(HARVEST_MARKER_PATH, { schemaVersion: 1, lastEmittedFinishedAt: report?.telemetry?.finishedAt, updatedAt: now() });
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) runScoutHarvest().catch(e => { console.error(JSON.stringify({ event: "shark_scout_harvest_orchestrator_failed", error: e instanceof Error ? e.message : String(e) })); process.exitCode = 1; });
