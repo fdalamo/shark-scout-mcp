@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { buildLiveEdgeController } from "./live_edge_controller.js";
 import { buildFollowerPolicyLedger } from "./follower_policy_ledger.js";
+import { buildOpportunityDebt } from "./opportunity_debt.js";
 
 const MINUTE=60_000;
 
@@ -42,6 +43,8 @@ async function refreshTruthSurface(phase:"pre"|"post"){
   catch(e){console.log(JSON.stringify({event:`shark_scout_follower_policy_${phase}_degraded`,error:e instanceof Error?e.message:String(e)}));}
   try{await buildLiveEdgeController();}
   catch(e){console.log(JSON.stringify({event:`shark_scout_live_edge_${phase}_degraded`,error:e instanceof Error?e.message:String(e)}));}
+  try{await buildOpportunityDebt();}
+  catch(e){console.log(JSON.stringify({event:`shark_scout_opportunity_debt_${phase}_degraded`,error:e instanceof Error?e.message:String(e)}));}
 }
 
 async function runPipeline(){
@@ -61,6 +64,7 @@ async function runPipeline(){
     progressiveMaxWallets:Number(env.CANONICAL_PROGRESSIVE_MAX_WALLETS),
     progressiveProviderCalls:Number(env.CANONICAL_PROGRESSIVE_MAX_PROVIDER_CALLS),
     canonicalRescueMaxCalls:Number(env.CANONICAL_RESCUE_MAX_CALLS),
+    opportunityDebt:true,
     liveOdinMutation:false
   }));
   return await new Promise<number>((resolve,reject)=>{
