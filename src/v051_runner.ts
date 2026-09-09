@@ -1,9 +1,13 @@
 import { spawn } from "node:child_process";
+import { promises as fs } from "node:fs";
+import path from "node:path";
 import { buildLiveEdgeController } from "./live_edge_controller.js";
 import { buildFollowerPolicyLedger } from "./follower_policy_ledger.js";
 import { buildOpportunityDebt } from "./opportunity_debt.js";
+import { buildHourlyIntelligenceReport } from "./hourly_intelligence_report.js";
 
 const MINUTE=60_000;
+const QUOTA_PATH=process.env.SCOUT_QUOTA_SHIELD_PATH||"/data/quota-shield-summary.json";
 
 type QuotaPressure={
   total:number;
@@ -13,6 +17,13 @@ type QuotaPressure={
   computeOrRps:number;
   samples:string[];
 };
+
+async function atomic(file:string,data:any){
+  await fs.mkdir(path.dirname(file),{recursive:true});
+  const tmp=`${file}.${process.pid}.tmp`;
+  await fs.writeFile(tmp,JSON.stringify(data,null,2));
+  await fs.rename(tmp,file);
+}
 
 function clampNumber(value:string|undefined,fallback:number,min:number,max:number){
   const n=Number(value);
@@ -82,7 +93,7 @@ async function runPipeline(){
   const env=envWithLeanGuardrails();
   console.log(JSON.stringify({
     event:"shark_scout_v051_guardrails",
-    patch:"0.51.1-quota-truth-integrity",
+    patch:"0.52-hourly-intelligence-report",
     operatingScale:"~1_SOL",
     principle:"HOT truth first; cheap exploration preserved; expensive work must earn runtime",
     pipelineBudgetMs:Number(env.HARVEST_PIPELINE_BUDGET_MS),
@@ -98,6 +109,7 @@ async function runPipeline(){
     canonicalRescueMaxCalls:Number(env.CANONICAL_RESCUE_MAX_CALLS),
     opportunityDebt:true,
     quotaShield:true,
+    hourlyIntelligenceReport:true,
     liveOdinMutation:false
   }));
   const q:QuotaPressure={total:0,http429:0,maxUsage:0,rateLimit:0,computeOrRps:0,samples:[]};
@@ -108,13 +120,16 @@ async function runPipeline(){
     child.on("error",reject);
     child.on("exit",exitCode=>resolve(exitCode??1));
   });
-  console.log(JSON.stringify({
+  const summary={
     event:"shark_scout_quota_shield_summary",
+    generatedAt:new Date().toISOString(),
     processExitCode:code,
     semanticHealth:q.total>0?"DEGRADED_PROVIDER_LIMITED":"OK",
     quotaPressure:q,
     note:q.total>0?"Process success does not imply data health while provider quota pressure is present.":"No provider quota-pressure signatures observed in pipeline output."
-  }));
+  };
+  await atomic(QUOTA_PATH,summary);
+  console.log(JSON.stringify(summary));
   return code;
 }
 
@@ -122,6 +137,8 @@ async function main(){
   await refreshTruthSurface("pre");
   const code=await runPipeline();
   await refreshTruthSurface("post");
+  try{await buildHourlyIntelligenceReport();}
+  catch(e){console.log(JSON.stringify({event:"shark_scout_hourly_intelligence_report_degraded",error:e instanceof Error?e.message:String(e)}));}
   process.exitCode=code;
 }
 
