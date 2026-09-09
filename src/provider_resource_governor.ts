@@ -32,7 +32,7 @@ function currentWorkClass():WorkClass{return process.env.SCOUT_WORK_CLASS==="HOT
 async function read():Promise<BudgetState>{try{const x=JSON.parse(await fs.readFile(STATE_PATH,"utf8"));if(x?.schemaVersion!==2||x?.month!==month())return blank();return{schemaVersion:2,month:x.month,updatedAt:x.updatedAt||new Date().toISOString(),providers:x.providers||{}};}catch{return blank();}}
 async function write(s:BudgetState){await fs.mkdir(path.dirname(STATE_PATH),{recursive:true});s.updatedAt=new Date().toISOString();const tmp=`${STATE_PATH}.${process.pid}.tmp`;await fs.writeFile(tmp,JSON.stringify(s));await fs.rename(tmp,STATE_PATH);}
 function monthlySoft(provider:GovernedProvider){const x=MONTHLY_SOFT[provider];return Number.isFinite(x)&&x>0?x:null;}
-function legacyDailySoft(provider:GovernedProvider){const x=LEGACY_DAILY[provider];return Number.isFinite(x)&&x>0?x:null;}
+function legacyDailySoft(provider:GovernedProvider){const x=LEGACY_DAILY[provider];return typeof x==="number"&&Number.isFinite(x)&&x>0?x:null;}
 function ceilings(provider:GovernedProvider,workClass:WorkClass){const soft=monthlySoft(provider);if(!soft)return{soft:null,target:null,pace:null,hard:null};const target=soft*TARGET,elapsed=elapsedFraction(),burst=soft*BURST_FRACTION;const classExtra=workClass==="COLD"?0:workClass==="HOT"?soft*.10:soft*.15;const pace=Math.min(soft,target*elapsed+burst+classExtra);const hard=workClass==="COLD"?target:workClass==="HOT"?soft*.95:soft;return{soft,target,pace,hard};}
 
 export async function recordProviderBurn(provider:GovernedProvider,units:number,workClass:WorkClass=currentWorkClass()){
