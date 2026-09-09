@@ -1,6 +1,6 @@
 {
   "name": "shark-scout-mcp",
-  "version": "0.45.0",
+  "version": "0.46.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -33,11 +33,13 @@
     "evidence-funnel": "node dist/evidence_funnel.js",
     "engine-intelligence": "node dist/engine_intelligence.js",
     "external-evidence": "node dist/external_evidence_overlay.js",
+    "research-core-health": "node dist/research_core_health.js",
+    "ambiguity-adjudicator": "node dist/ambiguity_adjudicator.js",
     "dune-discovery": "node dist/dune_discovery.js",
     "dune-alpha": "node dist/dune_alpha_runner.js",
     "provider-fabric:smoke": "node dist/provider_fabric_smoke.js",
     "harvest": "node dist/harvest_pipeline.js",
-    "gauntlet": "node dist/maintenance.js && node dist/odin_sync.js && node dist/portfolio_audit_v2.js && node dist/mirror_opportunity_audit_v2.js && node dist/outcome_miner_v2.js && node dist/canonical_state_guard.js snapshot && node dist/deep_dive_fabric.js && VYBE_API_KEY= node dist/gauntlet_v6_fabric.js && node dist/canonical_state_guard.js restore && node dist/replay_shadow.js && node dist/canonical_state_guard.js snapshot && node dist/selection_skill.js && node dist/canonical_gauntlet_overlay.js && node dist/paper_odin_v2.js && node dist/odin_truth_ledger.js && node dist/dip_shadow.js && node dist/odin_cap_audit.js && node dist/cielo_validate.js && node dist/evidence_funnel.js && node dist/prospective_walkforward.js && node dist/odin_transfer_lab.js && node dist/odin_fixture_guard.js && node dist/odin_governance_snapshot.js && node dist/odin_policy_fragility.js && node dist/engine_intelligence.js && node dist/external_evidence_overlay.js"
+    "gauntlet": "node dist/maintenance.js && node dist/odin_sync.js && node dist/portfolio_audit_v2.js && node dist/mirror_opportunity_audit_v2.js && node dist/outcome_miner_v2.js && node dist/canonical_state_guard.js snapshot && node dist/deep_dive_fabric.js && VYBE_API_KEY= node dist/gauntlet_v6_fabric.js && node dist/canonical_state_guard.js restore && node dist/replay_shadow.js && node dist/canonical_state_guard.js snapshot && node dist/selection_skill.js && node dist/canonical_gauntlet_overlay.js && node dist/paper_odin_v2.js && node dist/odin_truth_ledger.js && node dist/dip_shadow.js && node dist/odin_cap_audit.js && node dist/cielo_validate.js && node dist/evidence_funnel.js && node dist/prospective_walkforward.js && node dist/odin_transfer_lab.js && node dist/odin_fixture_guard.js && node dist/odin_governance_snapshot.js && node dist/odin_policy_fragility.js && node dist/ambiguity_adjudicator.js && node dist/research_core_health.js && node dist/engine_intelligence.js && node dist/external_evidence_overlay.js"
   },
   "engines": {"node": ">=20"},
   "dependencies": {"@modelcontextprotocol/sdk": "^1.17.5","@solana/web3.js": "^1.98.4","express": "^5.1.0","zod": "^3.25.76"},
