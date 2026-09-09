@@ -31,17 +31,22 @@ function configHash(v: any) {
 function decision(row: AnyObj) {
   const state = String(row?.state || "");
   const eligibility = String(row?.odinEligibility || "");
-  const skip = String(row?.odinSkipReason || row?.executionEvidence?.reason || "");
+  const simulatedSkip = String(row?.odinSkipReason || "");
+  const executionReason = String(row?.executionEvidence?.reason || "");
   const executionSource = String(row?.executionEvidence?.source || "");
 
-  if (state === "FOLLOWER_BUY_MATCHED") return { decision: "COPIED", evidence: "OBSERVED_FOLLOWER", reason: null, confidence: "HIGH" };
+  if (state === "FOLLOWER_BUY_MATCHED") return { decision: "COPIED", evidence: "OBSERVED_FOLLOWER", reason: null, reasonSource: null, confidence: "HIGH" };
   if (state === "COPY_BLOCKED_BY_ODIN_POLICY") {
+    // A reconstructed/direct execution reason is temporally closer to what Odin actually did
+    // than an earlier paper/simulated eligibility reason. Preserve evidence provenance separately.
+    const reason = executionReason || simulatedSkip || "POLICY_LIMIT";
+    const reasonSource = executionReason ? "EXECUTION_EVIDENCE" : simulatedSkip ? "SIMULATED_SKIP" : "FALLBACK";
     const direct = /EXACT|ODIN_LOG|OBSERVED_EXECUTION/i.test(executionSource);
-    return { decision: "BLOCKED", evidence: direct ? "OBSERVED_BLOCKED" : "INFERRED_BLOCKED", reason: skip || "POLICY_LIMIT", confidence: direct ? "HIGH" : String(row?.executionEvidence?.confidence || "HIGH") };
+    return { decision: "BLOCKED", evidence: direct ? "OBSERVED_BLOCKED" : "INFERRED_BLOCKED", reason, reasonSource, confidence: direct ? "HIGH" : String(row?.executionEvidence?.confidence || "HIGH") };
   }
-  if (eligibility === "ODIN_INELIGIBLE") return { decision: "BLOCKED", evidence: "SIMULATED_POLICY", reason: skip || "ODIN_INELIGIBLE", confidence: "MEDIUM" };
-  if (state === "EXPECTED_COPY_NOT_MATCHED" || eligibility === "ODIN_ELIGIBLE") return { decision: "ELIGIBLE_NOT_COPIED", evidence: "POLICY_ELIGIBLE", reason: null, confidence: "HIGH" };
-  return { decision: "UNKNOWN", evidence: "INSUFFICIENT_EVIDENCE", reason: skip || null, confidence: "LOW" };
+  if (eligibility === "ODIN_INELIGIBLE") return { decision: "BLOCKED", evidence: "SIMULATED_POLICY", reason: simulatedSkip || executionReason || "ODIN_INELIGIBLE", reasonSource: simulatedSkip ? "SIMULATED_SKIP" : executionReason ? "EXECUTION_EVIDENCE" : "FALLBACK", confidence: "MEDIUM" };
+  if (state === "EXPECTED_COPY_NOT_MATCHED" || eligibility === "ODIN_ELIGIBLE") return { decision: "ELIGIBLE_NOT_COPIED", evidence: "POLICY_ELIGIBLE", reason: null, reasonSource: null, confidence: "HIGH" };
+  return { decision: "UNKNOWN", evidence: "INSUFFICIENT_EVIDENCE", reason: executionReason || simulatedSkip || null, reasonSource: executionReason ? "EXECUTION_EVIDENCE" : simulatedSkip ? "SIMULATED_SKIP" : null, confidence: "LOW" };
 }
 function ruleKey(row: AnyObj, d: AnyObj) {
   if (d.decision !== "BLOCKED") return null;
@@ -55,6 +60,32 @@ function ruleKey(row: AnyObj, d: AnyObj) {
   if (r.includes("HOURLY_CAP")) return "HOURLY_CAP";
   if (r.includes("BUYS_DISABLED")) return "BUYS_DISABLED";
   return r || "OTHER_POLICY";
+}
+function sourceExitObserved(row: AnyObj) {
+  const rt = row?.sourceRoundTrip;
+  if (!rt || typeof rt !== "object") return false;
+  const soldFraction = num(rt?.soldFraction);
+  return Boolean(
+    (soldFraction !== null && soldFraction > 0) ||
+    rt?.sourceSellSignature || rt?.sellSignature || rt?.exitSignature ||
+    rt?.sourceSoldAt || rt?.soldAt || rt?.exitAt
+  );
+}
+function actualFollowerNet(row: AnyObj) {
+  return num(row?.actualFollowerNetSol ?? row?.followerRealizedNetSol ?? row?.sourceRoundTrip?.actualFollowerNetSol ?? row?.sourceRoundTrip?.followerRealizedNetSol);
+}
+function lifecycle(row: AnyObj, d: AnyObj) {
+  const copied = Boolean(row?.copied || row?.state === "FOLLOWER_BUY_MATCHED");
+  const followerExit = Boolean(row?.followerExitObserved);
+  const sourceExit = sourceExitObserved(row);
+  const actualNet = actualFollowerNet(row);
+  if (copied && followerExit && actualNet !== null) return "REALIZED_ACTUAL_ODIN_AVAILABLE";
+  if (copied && followerExit) return "FOLLOWER_EXIT_MATCHED";
+  if (copied && sourceExit) return "SOURCE_EXIT_OBSERVED_FOLLOWER_EXIT_PENDING";
+  if (copied) return "FOLLOWER_ENTRY_MATCHED";
+  if (d.decision === "BLOCKED") return "POLICY_BLOCKED";
+  if (d.decision === "ELIGIBLE_NOT_COPIED") return "ELIGIBLE_NOT_COPIED";
+  return "UNRESOLVED";
 }
 
 export async function buildFollowerPolicyLedger() {
@@ -78,6 +109,7 @@ export async function buildFollowerPolicyLedger() {
     const policy = walletPolicy(mirror);
     const roundTrip = row?.sourceRoundTrip || null;
     const previous = entries[key] || {};
+    const actualNet = actualFollowerNet(row);
     entries[key] = {
       ...previous,
       key,
@@ -94,13 +126,17 @@ export async function buildFollowerPolicyLedger() {
       odinDecision: d.decision,
       decisionEvidence: d.evidence,
       decisionReason: d.reason,
+      decisionReasonSource: d.reasonSource,
       decisionConfidence: d.confidence,
       copied: Boolean(row?.copied || row?.state === "FOLLOWER_BUY_MATCHED"),
       followerBuySignature: row?.copySignature || null,
       followerBuyDelaySeconds: num(row?.copyDelaySeconds),
+      sourceExitObserved: sourceExitObserved(row),
       followerExitObserved: Boolean(row?.followerExitObserved),
       followerExitSignature: row?.followerExitSignature || null,
       followerExitDelaySeconds: num(row?.followerExitDelaySeconds),
+      followerLifecycle: lifecycle(row, d),
+      actualFollowerNetSol: actualNet,
       sourceRoundTrip: roundTrip,
       estimatedFollowerNetSol: num(roundTrip?.estimatedFollowerNetSol),
       sourceRoi: num(roundTrip?.sourceRoi),
@@ -146,14 +182,21 @@ export async function buildFollowerPolicyLedger() {
       unknown: rs.filter((x: AnyObj) => x.odinDecision === "UNKNOWN").length,
       followerMatchesWithDelay: copied.filter((x: AnyObj) => typeof x.followerBuyDelaySeconds === "number").length,
       meanFollowerDelaySeconds: (() => { const xs = copied.map((x: AnyObj) => num(x.followerBuyDelaySeconds)).filter((x: number | null): x is number => x !== null); return xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null; })(),
+      followerLifecycle: {
+        entryMatched: rs.filter((x: AnyObj) => x.followerLifecycle === "FOLLOWER_ENTRY_MATCHED").length,
+        sourceExitFollowerPending: rs.filter((x: AnyObj) => x.followerLifecycle === "SOURCE_EXIT_OBSERVED_FOLLOWER_EXIT_PENDING").length,
+        followerExitMatched: rs.filter((x: AnyObj) => x.followerLifecycle === "FOLLOWER_EXIT_MATCHED").length,
+        realizedActualOdinAvailable: rs.filter((x: AnyObj) => x.followerLifecycle === "REALIZED_ACTUAL_ODIN_AVAILABLE").length
+      },
       eligibleMissKnownNetSol: sum(eligibleMiss.map((x: AnyObj) => num(x.estimatedFollowerNetSol))),
       blockedKnownNetSol: sum(knownBlocked.map((x: AnyObj) => num(x.estimatedFollowerNetSol))),
+      actualFollowerRealizedNetSol: sum(rs.map((x: AnyObj) => num(x.actualFollowerNetSol))),
       rules
     };
   });
 
   const out = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     event: "shark_scout_follower_policy_ledger_complete",
     generatedAt,
     policySnapshotHash: snapshotHash,
@@ -166,14 +209,21 @@ export async function buildFollowerPolicyLedger() {
       inferredBlocked: rows.filter((x: AnyObj) => x.decisionEvidence === "INFERRED_BLOCKED").length,
       simulatedPolicyBlocked: rows.filter((x: AnyObj) => x.decisionEvidence === "SIMULATED_POLICY").length,
       eligibleNotCopied: rows.filter((x: AnyObj) => x.odinDecision === "ELIGIBLE_NOT_COPIED").length,
-      unknown: rows.filter((x: AnyObj) => x.odinDecision === "UNKNOWN").length
+      unknown: rows.filter((x: AnyObj) => x.odinDecision === "UNKNOWN").length,
+      followerEntryMatched: rows.filter((x: AnyObj) => x.followerLifecycle === "FOLLOWER_ENTRY_MATCHED").length,
+      sourceExitFollowerPending: rows.filter((x: AnyObj) => x.followerLifecycle === "SOURCE_EXIT_OBSERVED_FOLLOWER_EXIT_PENDING").length,
+      followerExitMatched: rows.filter((x: AnyObj) => x.followerLifecycle === "FOLLOWER_EXIT_MATCHED").length,
+      realizedActualOdinAvailable: rows.filter((x: AnyObj) => x.followerLifecycle === "REALIZED_ACTUAL_ODIN_AVAILABLE").length
     },
     byMirror,
     entries,
     guardrails: { observationalOnly: true, mutatesOdin: false, changesCapital: false, changesCaps: false, changesFilters: false, changesSpeed: false },
     notes: [
       "Observed follower transactions are ground truth for copies.",
+      "For reconstructed policy blocks, executionEvidence.reason outranks earlier simulated skip reasons, while reconstructed/inferred evidence remains explicitly non-observed.",
       "Inferred blocks are never silently promoted to observed Odin blocks.",
+      "Follower lifecycle distinguishes entry matched, source exit with follower exit pending, follower exit matched, and realized ACTUAL_ODIN availability.",
+      "Actual follower P&L is only reported when an observed/recorded follower realized-net value exists; estimated follower P&L remains separate.",
       "Policy simulation uses the current wallet-specific registry and truth-ledger evidence.",
       "Rule value is avoided modeled losses minus missed modeled profits and is only computed where a source outcome exists.",
       "Eligible-not-copied is kept distinct from policy-blocked so execution/transfer misses are not misclassified.",
