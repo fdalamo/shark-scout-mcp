@@ -52,7 +52,7 @@ const stages:Stage[]=[
 ];
 const protectedCanonicalStages=new Set(["deep_dive","gauntlet_v6","canonical_restore"]);
 const eventRefreshStages=new Set(["paper_odin_refresh","dip_shadow_refresh"]);
-const heliusSpecialtyDirectStages=new Set(["portfolio_audit","paper_odin_fast","dip_shadow_fast","deep_dive","paper_odin_refresh","dip_shadow_refresh"]);
+const heliusSpecialtyDirectStages=new Set(["portfolio_audit","paper_odin_fast","dip_shadow_fast","harvest_scout","deep_dive","paper_odin_refresh","dip_shadow_refresh"]);
 function log(event:string,extra:Record<string,unknown>={}){console.log(JSON.stringify({level:"info",event,at:new Date().toISOString(),...extra}));}
 function skipped(stage:Stage,status:"SKIPPED_BUDGET"|"SKIPPED_EVENT"|"SKIPPED_PROVIDER"="SKIPPED_BUDGET"):StageResult{return{name:stage.name,phase:stage.phase,workClass:stage.workClass,status,durationMs:0,exitCode:null,signal:null};}
 function hotRefreshNeeded(){try{const x=JSON.parse(readFileSync(HOT_EVENT_DECISION_PATH,"utf8"));return x?.refresh!==false;}catch{return true;}}
