@@ -4,76 +4,135 @@ import path from "node:path";
 
 type Phase="MONITOR"|"DISCOVERY"|"CANONICAL"|"FINALIZE";
 type WorkClass="HOT"|"COLD"|"SYSTEM";
-type Stage={name:string;args:string[];timeoutMs:number;phase:Phase;workClass:WorkClass;continueOnFailure?:boolean;env?:Record<string,string>};
+type Stage={name:string;args:string[];timeoutMs:number;phase:Phase;workClass:WorkClass;continueOnFailure?:boolean;env?:Record<string,string>;cadenceHours?:number;priority?:number};
 type StageStatus="SUCCESS"|"FAILED"|"TIMED_OUT"|"SKIPPED_BUDGET"|"SKIPPED_EVENT"|"SKIPPED_PROVIDER";
 type StageResult={name:string;phase:Phase;workClass:WorkClass;status:StageStatus;durationMs:number;exitCode:number|null;signal:NodeJS.Signals|null;execution:"EXECUTED"|"SKIPPED";freshness:"UNDECLARED"|"SKIPPED";degradedReason?:string};
+type Pressure="GREEN"|"YELLOW"|"RED";
+type CadenceState={schemaVersion:1;updatedAt?:string;lastSuccessAt:Record<string,string>};
 
 const MINUTE=60_000;
-const PIPELINE_VERSION=16;
-const ODIN_RESEARCH_CORE="v0.46.0";
-const PIPELINE_BUDGET_MS=Math.max(20*MINUTE,Math.min(58*MINUTE,Number(process.env.HARVEST_PIPELINE_BUDGET_MS||50*MINUTE)));
-const FINALIZE_RESERVE_MS=Math.max(5*MINUTE,Math.min(15*MINUTE,Number(process.env.HARVEST_FINALIZE_RESERVE_MS||8*MINUTE)));
+const HOUR=60*MINUTE;
+const PIPELINE_VERSION=17;
+const ODIN_RESEARCH_CORE="v0.51.0";
+const PIPELINE_BUDGET_MS=Math.max(16*MINUTE,Math.min(20*MINUTE,Number(process.env.HARVEST_PIPELINE_BUDGET_MS||20*MINUTE)));
+const FINALIZE_RESERVE_MS=Math.max(7*MINUTE,Math.min(9*MINUTE,Number(process.env.HARVEST_FINALIZE_RESERVE_MS||8*MINUTE)));
+const DISCOVERY_BUDGET_MS=Math.max(2*MINUTE,Math.min(4*MINUTE,Number(process.env.HARVEST_DISCOVERY_BUDGET_MS||4*MINUTE)));
+const CANONICAL_RESEARCH_BUDGET_MS=Math.max(3*MINUTE,Math.min(5*MINUTE,Number(process.env.HARVEST_CANONICAL_RESEARCH_BUDGET_MS||5*MINUTE)));
+const DISCOVERY_CADENCE_HOURS=Math.max(2,Math.min(6,Number(process.env.HARVEST_DISCOVERY_CADENCE_HOURS||4)));
 const HOT_EVENT_DECISION_PATH=process.env.HOT_EVENT_DECISION_PATH||"/data/hot-event-decision.json";
 const GAUNTLET_REPORT_PATH=process.env.SCOUT_GAUNTLET_PATH||"/data/latest-gauntlet.json";
 const RESEARCH_CORE_HEALTH_PATH=process.env.SCOUT_RESEARCH_CORE_HEALTH_PATH||"/data/research-core-health.json";
 const PIPELINE_TRUTH_PATH=process.env.SCOUT_PIPELINE_TRUTH_PATH||"/data/pipeline-truth.json";
+const CADENCE_STATE_PATH=process.env.SCOUT_LEAN_SCHEDULER_STATE_PATH||"/data/lean-scheduler-state.json";
 const TELEMETRY_URL=(process.env.SCOUT_TELEMETRY_URL||"").trim();
 const TELEMETRY_TOKEN=(process.env.SHARK_TELEMETRY_TOKEN||"").trim();
 const TELEMETRY_TIMEOUT_MS=Math.max(1000,Math.min(10000,Number(process.env.SCOUT_TELEMETRY_TIMEOUT_MS||5000)));
 const HELIUS_HARD_QUOTA_COOLDOWN_MS=Math.max(10*MINUTE,Math.min(60*MINUTE,Number(process.env.HELIUS_HARD_QUOTA_COOLDOWN_MS||20*MINUTE)));
 
 const stages:Stage[]=[
-{name:"maintenance",phase:"MONITOR",workClass:"HOT",args:["dist/maintenance.js"],timeoutMs:2*MINUTE,continueOnFailure:true},
-{name:"odin_sync",phase:"MONITOR",workClass:"HOT",args:["dist/odin_sync.js"],timeoutMs:2*MINUTE,continueOnFailure:true},
-{name:"portfolio_audit",phase:"MONITOR",workClass:"HOT",args:["dist/portfolio_audit_v2.js"],timeoutMs:3*MINUTE,continueOnFailure:true},
-{name:"opportunity_audit",phase:"MONITOR",workClass:"HOT",args:["dist/mirror_opportunity_audit_v2.js"],timeoutMs:4*MINUTE,continueOnFailure:true},
-{name:"paper_odin_fast",phase:"MONITOR",workClass:"HOT",args:["dist/paper_odin_v2.js"],timeoutMs:4*MINUTE,continueOnFailure:true},
-{name:"odin_truth_ledger",phase:"MONITOR",workClass:"HOT",args:["dist/odin_truth_ledger.js"],timeoutMs:1*MINUTE,continueOnFailure:true},
-{name:"dip_shadow_fast",phase:"MONITOR",workClass:"HOT",args:["dist/dip_shadow.js"],timeoutMs:4*MINUTE,continueOnFailure:true},
-{name:"dune_alpha",phase:"DISCOVERY",workClass:"COLD",args:["dist/dune_alpha_runner.js"],timeoutMs:3*MINUTE,continueOnFailure:true},
-{name:"outcome_miner_v2",phase:"DISCOVERY",workClass:"COLD",args:["dist/outcome_miner_v2.js"],timeoutMs:10*MINUTE,continueOnFailure:true},
-{name:"harvest_scout",phase:"DISCOVERY",workClass:"COLD",args:["dist/harvest_scout_fabric.js"],timeoutMs:12*MINUTE,continueOnFailure:true},
-{name:"canonical_snapshot_pre",phase:"CANONICAL",workClass:"SYSTEM",args:["dist/canonical_state_guard.js","snapshot"],timeoutMs:2*MINUTE},
-{name:"deep_dive",phase:"CANONICAL",workClass:"COLD",args:["dist/deep_dive_fabric.js"],timeoutMs:10*MINUTE,continueOnFailure:true},
-{name:"gauntlet_v6",phase:"CANONICAL",workClass:"COLD",args:["dist/gauntlet_v6_fabric.js"],timeoutMs:10*MINUTE,continueOnFailure:true,env:{VYBE_API_KEY:""}},
-{name:"canonical_restore",phase:"CANONICAL",workClass:"SYSTEM",args:["dist/canonical_state_guard.js","restore"],timeoutMs:2*MINUTE},
-{name:"replay_shadow",phase:"CANONICAL",workClass:"COLD",args:["dist/replay_shadow.js"],timeoutMs:6*MINUTE,continueOnFailure:true},
-{name:"canonical_snapshot_post",phase:"CANONICAL",workClass:"SYSTEM",args:["dist/canonical_state_guard.js","snapshot"],timeoutMs:2*MINUTE},
-{name:"selection_skill",phase:"CANONICAL",workClass:"COLD",args:["dist/selection_skill.js"],timeoutMs:3*MINUTE,continueOnFailure:true},
-{name:"canonical_overlay",phase:"CANONICAL",workClass:"SYSTEM",args:["dist/canonical_gauntlet_overlay.js"],timeoutMs:3*MINUTE},
-{name:"hot_event_gate",phase:"FINALIZE",workClass:"SYSTEM",args:["dist/hot_event_gate.js"],timeoutMs:2*MINUTE,continueOnFailure:true},
-{name:"paper_odin_refresh",phase:"FINALIZE",workClass:"HOT",args:["dist/paper_odin_v2.js"],timeoutMs:4*MINUTE,continueOnFailure:true},
-{name:"odin_truth_refresh",phase:"FINALIZE",workClass:"HOT",args:["dist/odin_truth_ledger.js"],timeoutMs:1*MINUTE,continueOnFailure:true},
-{name:"dip_shadow_refresh",phase:"FINALIZE",workClass:"HOT",args:["dist/dip_shadow.js"],timeoutMs:4*MINUTE,continueOnFailure:true},
-{name:"odin_cap_audit",phase:"FINALIZE",workClass:"HOT",args:["dist/odin_cap_audit.js"],timeoutMs:3*MINUTE,continueOnFailure:true},
-{name:"cielo_validate",phase:"FINALIZE",workClass:"COLD",args:["dist/cielo_validate.js"],timeoutMs:3*MINUTE,continueOnFailure:true},
-{name:"production_truth_health",phase:"FINALIZE",workClass:"SYSTEM",args:["dist/production_truth_health.js"],timeoutMs:1*MINUTE,continueOnFailure:true},
-{name:"evidence_funnel",phase:"FINALIZE",workClass:"SYSTEM",args:["dist/evidence_funnel.js"],timeoutMs:3*MINUTE},
-{name:"prospective_walkforward",phase:"FINALIZE",workClass:"SYSTEM",args:["dist/prospective_walkforward.js"],timeoutMs:1*MINUTE,continueOnFailure:true},
-{name:"odin_transfer_lab",phase:"FINALIZE",workClass:"SYSTEM",args:["dist/odin_transfer_lab.js"],timeoutMs:1*MINUTE,continueOnFailure:true},
-{name:"odin_fixture_guard",phase:"FINALIZE",workClass:"SYSTEM",args:["dist/odin_fixture_guard.js"],timeoutMs:1*MINUTE,continueOnFailure:true},
-{name:"odin_governance",phase:"FINALIZE",workClass:"SYSTEM",args:["dist/odin_governance_snapshot.js"],timeoutMs:1*MINUTE,continueOnFailure:true},
-{name:"odin_policy_fragility",phase:"FINALIZE",workClass:"SYSTEM",args:["dist/odin_policy_fragility.js"],timeoutMs:1*MINUTE,continueOnFailure:true},
-{name:"ambiguity_adjudicator",phase:"FINALIZE",workClass:"SYSTEM",args:["dist/ambiguity_adjudicator.js"],timeoutMs:1*MINUTE,continueOnFailure:true},
-{name:"research_core_health",phase:"FINALIZE",workClass:"SYSTEM",args:["dist/research_core_health.js"],timeoutMs:1*MINUTE,continueOnFailure:true},
-{name:"engine_intelligence",phase:"FINALIZE",workClass:"SYSTEM",args:["dist/engine_intelligence.js"],timeoutMs:3*MINUTE},
-{name:"external_evidence_overlay",phase:"FINALIZE",workClass:"SYSTEM",args:["dist/external_evidence_overlay.js"],timeoutMs:2*MINUTE}
+{name:"maintenance",phase:"MONITOR",workClass:"HOT",args:["dist/maintenance.js"],timeoutMs:2*MINUTE,continueOnFailure:true,priority:100},
+{name:"odin_sync",phase:"MONITOR",workClass:"HOT",args:["dist/odin_sync.js"],timeoutMs:2*MINUTE,continueOnFailure:true,priority:100},
+{name:"portfolio_audit",phase:"MONITOR",workClass:"HOT",args:["dist/portfolio_audit_v2.js"],timeoutMs:2*MINUTE,continueOnFailure:true,priority:100},
+{name:"opportunity_audit",phase:"MONITOR",workClass:"HOT",args:["dist/mirror_opportunity_audit_v2.js"],timeoutMs:3*MINUTE,continueOnFailure:true,priority:100},
+{name:"paper_odin_fast",phase:"MONITOR",workClass:"HOT",args:["dist/paper_odin_v2.js"],timeoutMs:3*MINUTE,continueOnFailure:true,priority:100},
+{name:"odin_truth_ledger",phase:"MONITOR",workClass:"HOT",args:["dist/odin_truth_ledger.js"],timeoutMs:1*MINUTE,continueOnFailure:true,priority:100},
+{name:"dip_shadow_fast",phase:"MONITOR",workClass:"HOT",args:["dist/dip_shadow.js"],timeoutMs:2*MINUTE,continueOnFailure:true,priority:90},
+{name:"dune_alpha",phase:"DISCOVERY",workClass:"COLD",args:["dist/dune_alpha_runner.js"],timeoutMs:1*MINUTE,continueOnFailure:true,cadenceHours:DISCOVERY_CADENCE_HOURS,priority:25},
+{name:"outcome_miner_v2",phase:"DISCOVERY",workClass:"COLD",args:["dist/outcome_miner_v2.js"],timeoutMs:90_000,continueOnFailure:true,cadenceHours:DISCOVERY_CADENCE_HOURS,priority:20},
+{name:"harvest_scout",phase:"DISCOVERY",workClass:"COLD",args:["dist/harvest_scout_fabric.js"],timeoutMs:3*MINUTE,continueOnFailure:true,cadenceHours:DISCOVERY_CADENCE_HOURS,priority:15},
+{name:"canonical_snapshot_pre",phase:"CANONICAL",workClass:"SYSTEM",args:["dist/canonical_state_guard.js","snapshot"],timeoutMs:2*MINUTE,priority:80},
+{name:"deep_dive",phase:"CANONICAL",workClass:"COLD",args:["dist/deep_dive_fabric.js"],timeoutMs:2*MINUTE,continueOnFailure:true,priority:70},
+{name:"gauntlet_v6",phase:"CANONICAL",workClass:"COLD",args:["dist/gauntlet_v6_fabric.js"],timeoutMs:2*MINUTE,continueOnFailure:true,env:{VYBE_API_KEY:""},priority:65},
+{name:"canonical_restore",phase:"CANONICAL",workClass:"SYSTEM",args:["dist/canonical_state_guard.js","restore"],timeoutMs:2*MINUTE,priority:100},
+{name:"replay_shadow",phase:"CANONICAL",workClass:"COLD",args:["dist/replay_shadow.js"],timeoutMs:150_000,continueOnFailure:true,priority:75},
+{name:"canonical_snapshot_post",phase:"CANONICAL",workClass:"SYSTEM",args:["dist/canonical_state_guard.js","snapshot"],timeoutMs:2*MINUTE,priority:80},
+{name:"selection_skill",phase:"CANONICAL",workClass:"COLD",args:["dist/selection_skill.js"],timeoutMs:1*MINUTE,continueOnFailure:true,priority:60},
+{name:"canonical_overlay",phase:"CANONICAL",workClass:"SYSTEM",args:["dist/canonical_gauntlet_overlay.js"],timeoutMs:2*MINUTE,priority:80},
+{name:"hot_event_gate",phase:"FINALIZE",workClass:"SYSTEM",args:["dist/hot_event_gate.js"],timeoutMs:1*MINUTE,continueOnFailure:true,priority:100},
+{name:"paper_odin_refresh",phase:"FINALIZE",workClass:"HOT",args:["dist/paper_odin_v2.js"],timeoutMs:3*MINUTE,continueOnFailure:true,priority:100},
+{name:"odin_truth_refresh",phase:"FINALIZE",workClass:"HOT",args:["dist/odin_truth_ledger.js"],timeoutMs:1*MINUTE,continueOnFailure:true,priority:100},
+{name:"dip_shadow_refresh",phase:"FINALIZE",workClass:"HOT",args:["dist/dip_shadow.js"],timeoutMs:2*MINUTE,continueOnFailure:true,priority:90},
+{name:"odin_cap_audit",phase:"FINALIZE",workClass:"HOT",args:["dist/odin_cap_audit.js"],timeoutMs:2*MINUTE,continueOnFailure:true,priority:100},
+{name:"cielo_validate",phase:"FINALIZE",workClass:"COLD",args:["dist/cielo_validate.js"],timeoutMs:1*MINUTE,continueOnFailure:true,cadenceHours:2,priority:40},
+{name:"production_truth_health",phase:"FINALIZE",workClass:"SYSTEM",args:["dist/production_truth_health.js"],timeoutMs:1*MINUTE,continueOnFailure:true,priority:100},
+{name:"evidence_funnel",phase:"FINALIZE",workClass:"SYSTEM",args:["dist/evidence_funnel.js"],timeoutMs:2*MINUTE,priority:90},
+{name:"prospective_walkforward",phase:"FINALIZE",workClass:"SYSTEM",args:["dist/prospective_walkforward.js"],timeoutMs:1*MINUTE,continueOnFailure:true,priority:90},
+{name:"odin_transfer_lab",phase:"FINALIZE",workClass:"SYSTEM",args:["dist/odin_transfer_lab.js"],timeoutMs:1*MINUTE,continueOnFailure:true,priority:100},
+{name:"odin_fixture_guard",phase:"FINALIZE",workClass:"SYSTEM",args:["dist/odin_fixture_guard.js"],timeoutMs:1*MINUTE,continueOnFailure:true,priority:90},
+{name:"odin_governance",phase:"FINALIZE",workClass:"SYSTEM",args:["dist/odin_governance_snapshot.js"],timeoutMs:1*MINUTE,continueOnFailure:true,priority:80},
+{name:"odin_policy_fragility",phase:"FINALIZE",workClass:"SYSTEM",args:["dist/odin_policy_fragility.js"],timeoutMs:1*MINUTE,continueOnFailure:true,priority:80},
+{name:"ambiguity_adjudicator",phase:"FINALIZE",workClass:"SYSTEM",args:["dist/ambiguity_adjudicator.js"],timeoutMs:1*MINUTE,continueOnFailure:true,priority:60},
+{name:"research_core_health",phase:"FINALIZE",workClass:"SYSTEM",args:["dist/research_core_health.js"],timeoutMs:1*MINUTE,continueOnFailure:true,priority:90},
+{name:"engine_intelligence",phase:"FINALIZE",workClass:"SYSTEM",args:["dist/engine_intelligence.js"],timeoutMs:2*MINUTE,priority:80},
+{name:"external_evidence_overlay",phase:"FINALIZE",workClass:"SYSTEM",args:["dist/external_evidence_overlay.js"],timeoutMs:1*MINUTE,priority:50}
 ];
+
 const protectedCanonicalStages=new Set(["deep_dive","gauntlet_v6","canonical_restore"]);
 const eventRefreshStages=new Set(["paper_odin_refresh","dip_shadow_refresh"]);
-const heliusSpecialtyColdStages=new Set<string>();
+const providerSensitiveDiscovery=new Set(["dune_alpha","outcome_miner_v2","harvest_scout","cielo_validate"]);
+const providerSensitiveCold=new Set(stages.filter(s=>s.workClass==="COLD").map(s=>s.name));
+
 function log(event:string,extra:Record<string,unknown>={}){console.log(JSON.stringify({level:"info",event,at:new Date().toISOString(),...extra}));}
 function skipped(stage:Stage,status:Extract<StageStatus,"SKIPPED_BUDGET"|"SKIPPED_EVENT"|"SKIPPED_PROVIDER">="SKIPPED_BUDGET",degradedReason?:string):StageResult{return{name:stage.name,phase:stage.phase,workClass:stage.workClass,status,durationMs:0,exitCode:null,signal:null,execution:"SKIPPED",freshness:"SKIPPED",degradedReason};}
+function readJsonSync(file:string,fallback:any){try{return JSON.parse(readFileSync(file,"utf8"));}catch{return fallback;}}
+function atomicWrite(file:string,data:any){mkdirSync(path.dirname(file),{recursive:true});const tmp=`${file}.${process.pid}.tmp`;writeFileSync(tmp,JSON.stringify(data,null,2));renameSync(tmp,file);}
 function hotRefreshNeeded(){try{const x=JSON.parse(readFileSync(HOT_EVENT_DECISION_PATH,"utf8"));return x?.refresh!==false;}catch{return true;}}
 function heliusHardQuotaCoolingDown(){try{const x=JSON.parse(readFileSync(GAUNTLET_REPORT_PATH,"utf8"));const opens=Number(x?.providerStats?.heliusCircuitOpens||0),at=Date.parse(String(x?.finishedAt||x?.generatedAt||"")),ageMs=Date.now()-at;if(opens<=0||!Number.isFinite(ageMs)||ageMs<0||ageMs>HELIUS_HARD_QUOTA_COOLDOWN_MS)return null;return{opens,ageMs,until:new Date(at+HELIUS_HARD_QUOTA_COOLDOWN_MS).toISOString()};}catch{return null;}}
 function researchCoreHealth(){try{const x=JSON.parse(readFileSync(RESEARCH_CORE_HEALTH_PATH,"utf8"));return{status:String(x?.status||"UNKNOWN"),degradedReasons:Array.isArray(x?.degradedReasons)?x.degradedReasons:[],finishedAt:x?.finishedAt||null};}catch{return{status:"UNKNOWN",degradedReasons:["research_core_health_unavailable"],finishedAt:null};}}
-function pipelineTruthDocument(data:Record<string,unknown>){return{schemaVersion:4,event:"shark_scout_pipeline_truth",pipelineVersion:PIPELINE_VERSION,odinResearchCore:ODIN_RESEARCH_CORE,stageCatalog:stages.map(s=>({name:s.name,phase:s.phase,workClass:s.workClass})),...data};}
-function persistPipelineTruth(data:Record<string,unknown>){const doc=pipelineTruthDocument(data);try{mkdirSync(path.dirname(PIPELINE_TRUTH_PATH),{recursive:true});const tmp=`${PIPELINE_TRUTH_PATH}.${process.pid}.tmp`;writeFileSync(tmp,JSON.stringify(doc,null,2));renameSync(tmp,PIPELINE_TRUTH_PATH);}catch(e){log("shark_scout_pipeline_truth_persist_failed",{error:String(e)});}return doc;}
+function loadCadence():CadenceState{const x=readJsonSync(CADENCE_STATE_PATH,{schemaVersion:1,lastSuccessAt:{}});return{schemaVersion:1,updatedAt:x?.updatedAt,lastSuccessAt:x?.lastSuccessAt&&typeof x.lastSuccessAt==="object"?x.lastSuccessAt:{}};}
+function cadenceDue(stage:Stage,state:CadenceState){if(!stage.cadenceHours)return{due:true,ageMs:null,nextAt:null};const last=Date.parse(String(state.lastSuccessAt[stage.name]||""));if(!Number.isFinite(last))return{due:true,ageMs:null,nextAt:null};const ageMs=Date.now()-last,need=stage.cadenceHours*HOUR;return{due:ageMs>=need,ageMs,nextAt:new Date(last+need).toISOString()};}
+function markCadenceSuccess(stage:Stage,state:CadenceState){if(!stage.cadenceHours)return;state.lastSuccessAt[stage.name]=new Date().toISOString();state.updatedAt=new Date().toISOString();try{atomicWrite(CADENCE_STATE_PATH,state);}catch(e){log("shark_scout_lean_cadence_persist_failed",{stage:stage.name,error:String(e)});}}
+function pipelineTruthDocument(data:Record<string,unknown>){return{schemaVersion:5,event:"shark_scout_pipeline_truth",pipelineVersion:PIPELINE_VERSION,odinResearchCore:ODIN_RESEARCH_CORE,stageCatalog:stages.map(s=>({name:s.name,phase:s.phase,workClass:s.workClass,cadenceHours:s.cadenceHours||null,priority:s.priority||null})),...data};}
+function persistPipelineTruth(data:Record<string,unknown>){const doc=pipelineTruthDocument(data);try{atomicWrite(PIPELINE_TRUTH_PATH,doc);}catch(e){log("shark_scout_pipeline_truth_persist_failed",{error:String(e)});}return doc;}
 async function publishPipelineTruth(doc:Record<string,unknown>){if(!TELEMETRY_URL){log("shark_scout_pipeline_truth_publish_skipped",{reason:"SCOUT_TELEMETRY_URL_NOT_CONFIGURED"});return false;}const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),TELEMETRY_TIMEOUT_MS);try{const headers:Record<string,string>={"content-type":"application/json"};if(TELEMETRY_TOKEN)headers["x-shark-telemetry-token"]=TELEMETRY_TOKEN;const response=await fetch(TELEMETRY_URL,{method:"POST",headers,body:JSON.stringify(doc),signal:controller.signal});if(!response.ok){log("shark_scout_pipeline_truth_publish_failed",{status:response.status,url:TELEMETRY_URL});return false;}log("shark_scout_pipeline_truth_published",{status:response.status,url:TELEMETRY_URL});return true;}catch(e){log("shark_scout_pipeline_truth_publish_failed",{error:String(e),url:TELEMETRY_URL});return false;}finally{clearTimeout(timer);}}
-async function runStage(stage:Stage,timeoutMs:number):Promise<StageResult>{const started=Date.now();log("shark_scout_stage_started",{stage:stage.name,phase:stage.phase,workClass:stage.workClass,timeoutMs});return await new Promise<StageResult>((resolve)=>{let timedOut=false,settled=false;const finish=(r:StageResult)=>{if(settled)return;settled=true;resolve(r);};const child=spawn(process.execPath,stage.args,{stdio:"inherit",env:{...process.env,SCOUT_WORK_CLASS:stage.workClass,...stage.env}});const timer=setTimeout(()=>{timedOut=true;log("shark_scout_stage_timeout",{stage:stage.name,phase:stage.phase,workClass:stage.workClass,elapsedMs:Date.now()-started});child.kill("SIGTERM");setTimeout(()=>{if(child.exitCode===null)child.kill("SIGKILL");},5000).unref();},timeoutMs);child.on("error",()=>{clearTimeout(timer);finish({name:stage.name,phase:stage.phase,workClass:stage.workClass,status:timedOut?"TIMED_OUT":"FAILED",durationMs:Date.now()-started,exitCode:null,signal:null,execution:"EXECUTED",freshness:"UNDECLARED"});});child.on("exit",(code,signal)=>{clearTimeout(timer);finish({name:stage.name,phase:stage.phase,workClass:stage.workClass,status:timedOut?"TIMED_OUT":code===0?"SUCCESS":"FAILED",durationMs:Date.now()-started,exitCode:code,signal,execution:"EXECUTED",freshness:"UNDECLARED"});});});}
+async function runStage(stage:Stage,timeoutMs:number):Promise<StageResult>{const started=Date.now();log("shark_scout_stage_started",{stage:stage.name,phase:stage.phase,workClass:stage.workClass,timeoutMs,priority:stage.priority||null});return await new Promise<StageResult>((resolve)=>{let timedOut=false,settled=false;const finish=(r:StageResult)=>{if(settled)return;settled=true;resolve(r);};const child=spawn(process.execPath,stage.args,{stdio:"inherit",env:{...process.env,SCOUT_WORK_CLASS:stage.workClass,...stage.env}});const timer=setTimeout(()=>{timedOut=true;log("shark_scout_stage_timeout",{stage:stage.name,phase:stage.phase,workClass:stage.workClass,elapsedMs:Date.now()-started});child.kill("SIGTERM");setTimeout(()=>{if(child.exitCode===null)child.kill("SIGKILL");},5000).unref();},timeoutMs);child.on("error",()=>{clearTimeout(timer);finish({name:stage.name,phase:stage.phase,workClass:stage.workClass,status:timedOut?"TIMED_OUT":"FAILED",durationMs:Date.now()-started,exitCode:null,signal:null,execution:"EXECUTED",freshness:"UNDECLARED"});});child.on("exit",(code,signal)=>{clearTimeout(timer);finish({name:stage.name,phase:stage.phase,workClass:stage.workClass,status:timedOut?"TIMED_OUT":code===0?"SUCCESS":"FAILED",durationMs:Date.now()-started,exitCode:code,signal,execution:"EXECUTED",freshness:"UNDECLARED"});});});}
 
-async function main(){const pipelineStarted=Date.now(),startedAt=new Date(pipelineStarted).toISOString(),deadline=pipelineStarted+PIPELINE_BUDGET_MS,results:StageResult[]=[];let lastPhase:Phase|null=null,canonicalSnapshotTaken=false;const queueCounts={HOT:stages.filter(x=>x.workClass==="HOT").length,COLD:stages.filter(x=>x.workClass==="COLD").length,SYSTEM:stages.filter(x=>x.workClass==="SYSTEM").length};persistPipelineTruth({status:"RUNNING",startedAt,finishedAt:null,stageCount:stages.length,stageResults:[]});log("shark_scout_pipeline_started",{version:PIPELINE_VERSION,stageCount:stages.length,queueCounts,budgetMs:PIPELINE_BUDGET_MS,finalizeReserveMs:FINALIZE_RESERVE_MS,eventDrivenHotRefresh:true,sharedHeliusHardQuotaCircuit:false,canonicalProviderFabric:true,canonicalHistoryIncremental:true,capAwareExecutionTruth:true,researchCoreHealth:true,boundedAmbiguityAdjudication:true,durablePipelineTruth:true,remotePipelineTruth:Boolean(TELEMETRY_URL),odinResearchCore:ODIN_RESEARCH_CORE});
-const emergencyRestore=async(reason:string)=>{if(!canonicalSnapshotTaken)return true;const restoreStage:Stage={name:"canonical_restore_emergency",phase:"FINALIZE",workClass:"SYSTEM",args:["dist/canonical_state_guard.js","restore"],timeoutMs:2*MINUTE};const restore=await runStage(restoreStage,2*MINUTE);results.push(restore);log("shark_scout_stage_finished",restore);if(restore.status==="SUCCESS"){canonicalSnapshotTaken=false;return true;}log("shark_scout_emergency_restore_failed",{reason,restore});return false;};
-for(const stage of stages){if(stage.phase!==lastPhase){lastPhase=stage.phase;log("shark_scout_phase_started",{phase:lastPhase,elapsedMs:Date.now()-pipelineStarted,remainingMs:deadline-Date.now()});}const remaining=Math.max(0,deadline-Date.now());if(stage.workClass==="COLD"&&remaining<=FINALIZE_RESERVE_MS){const r=skipped(stage,"SKIPPED_BUDGET","FINALIZE_RESERVE");results.push(r);log("shark_scout_stage_finished",r);continue;}if(stage.name==="canonical_snapshot_pre"&&remaining<=FINALIZE_RESERVE_MS+6*MINUTE){const r=skipped(stage,"SKIPPED_BUDGET","CANONICAL_RESERVE");results.push(r);log("shark_scout_stage_finished",r);continue;}if(protectedCanonicalStages.has(stage.name)&&!canonicalSnapshotTaken){const r=skipped(stage,"SKIPPED_BUDGET","CANONICAL_SNAPSHOT_UNAVAILABLE");results.push(r);log("shark_scout_stage_finished",r);continue;}if(heliusSpecialtyColdStages.has(stage.name)){const circuit=heliusHardQuotaCoolingDown();if(circuit){const r=skipped(stage,"SKIPPED_PROVIDER","RECENT_HELIUS_HARD_QUOTA_COLD_ONLY");results.push(r);log("shark_scout_helius_specialty_stage_skipped",{stage:stage.name,reason:r.degradedReason,...circuit});log("shark_scout_stage_finished",r);continue;}}if(eventRefreshStages.has(stage.name)&&!hotRefreshNeeded()){const r=skipped(stage,"SKIPPED_EVENT","NO_HOT_EVENT");results.push(r);log("shark_scout_stage_finished",r);continue;}const reserved=stage.workClass==="HOT"||stage.workClass==="SYSTEM"?0:FINALIZE_RESERVE_MS;const allowed=Math.max(1000,Math.min(stage.timeoutMs,deadline-Date.now()-reserved));const result=await runStage(stage,allowed);results.push(result);log("shark_scout_stage_finished",result);if(stage.name==="canonical_snapshot_pre"&&result.status==="SUCCESS")canonicalSnapshotTaken=true;if(stage.name==="canonical_restore"&&result.status==="SUCCESS")canonicalSnapshotTaken=false;if(result.status!=="SUCCESS"&&result.status!=="SKIPPED_EVENT"&&result.status!=="SKIPPED_PROVIDER"&&!stage.continueOnFailure){const restored=await emergencyRestore(`critical_stage_${stage.name}_${result.status}`);const finishedAt=new Date().toISOString();const truth=persistPipelineTruth({status:"ABORTED",startedAt,finishedAt,durationMs:Date.now()-pipelineStarted,stageCount:results.length,failedCount:1,failedStage:stage.name,failedStatus:result.status,emergencyRestoreOk:restored,stageResults:results});await publishPipelineTruth(truth);process.exitCode=1;return;}}
-if(canonicalSnapshotTaken){const restored=await emergencyRestore("pipeline_end_snapshot_open");if(!restored)process.exitCode=1;}const failed=results.filter(x=>x.status==="FAILED"||x.status==="TIMED_OUT"),skippedBudget=results.filter(x=>x.status==="SKIPPED_BUDGET"),skippedEvent=results.filter(x=>x.status==="SKIPPED_EVENT"),skippedProvider=results.filter(x=>x.status==="SKIPPED_PROVIDER"),executed=results.filter(x=>x.execution==="EXECUTED"),durationMs=Date.now()-pipelineStarted,finishedAt=new Date().toISOString(),researchHealth=researchCoreHealth();const degraded=skippedProvider.length>0||skippedBudget.length>0||researchHealth.status==="DEGRADED";const status=failed.length?"COMPLETE_WITH_FAILURES":degraded?"COMPLETE_DEGRADED":"COMPLETE";const runQuality={executedStages:executed.length,skippedStages:results.length-executed.length,providerSkipped:skippedProvider.length,budgetSkipped:skippedBudget.length,eventSkipped:skippedEvent.length,researchCoreHealth:researchHealth.status,researchCoreDegradedReasons:researchHealth.degradedReasons,suspiciouslyFast:durationMs<30_000&&degraded,freshnessDeclarationCoverage:0,note:"Stage-level fresh-vs-cache counters are not yet universally emitted; executed stages remain UNDECLARED rather than guessed. Canonical history and research-core health emit provider/cache/partial/backlog telemetry."};const summary={startedAt,finishedAt,durationMs,stageCount:results.length,failedCount:failed.length,skippedBudgetCount:skippedBudget.length,skippedEventCount:skippedEvent.length,skippedProviderCount:skippedProvider.length,failedStages:failed,skippedStages:skippedBudget.map(x=>({name:x.name,workClass:x.workClass,reason:x.degradedReason})),eventSkippedStages:skippedEvent.map(x=>x.name),providerSkippedStages:skippedProvider.map(x=>({name:x.name,reason:x.degradedReason})),runQuality,stageResults:results};const truth=persistPipelineTruth({status,...summary});const telemetryPublished=await publishPipelineTruth(truth);log("shark_scout_pipeline_complete",{status,...summary,telemetryPublished});if(failed.length&&process.exitCode!==1)process.exitCode=2;}
+async function main(){
+  const pipelineStarted=Date.now(),startedAt=new Date(pipelineStarted).toISOString(),deadline=pipelineStarted+PIPELINE_BUDGET_MS,results:StageResult[]=[];
+  const cadenceState=loadCadence();let lastPhase:Phase|null=null,canonicalSnapshotTaken=false,pressure:Pressure="GREEN",coldFailures=0;
+  let discoverySpentMs=0,canonicalResearchSpentMs=0;
+  const queueCounts={HOT:stages.filter(x=>x.workClass==="HOT").length,COLD:stages.filter(x=>x.workClass==="COLD").length,SYSTEM:stages.filter(x=>x.workClass==="SYSTEM").length};
+  persistPipelineTruth({status:"RUNNING",startedAt,finishedAt:null,stageCount:stages.length,stageResults:[]});
+  log("shark_scout_pipeline_started",{version:PIPELINE_VERSION,stageCount:stages.length,queueCounts,budgetMs:PIPELINE_BUDGET_MS,finalizeReserveMs:FINALIZE_RESERVE_MS,discoveryBudgetMs:DISCOVERY_BUDGET_MS,canonicalResearchBudgetMs:CANONICAL_RESEARCH_BUDGET_MS,discoveryCadenceHours:DISCOVERY_CADENCE_HOURS,decisionValueScheduler:true,protectedLiveTruth:true,providerPressureGovernor:true,explorationFloor:true,odinResearchCore:ODIN_RESEARCH_CORE});
+
+  const emergencyRestore=async(reason:string)=>{if(!canonicalSnapshotTaken)return true;const restoreStage:Stage={name:"canonical_restore_emergency",phase:"FINALIZE",workClass:"SYSTEM",args:["dist/canonical_state_guard.js","restore"],timeoutMs:2*MINUTE,priority:100};const restore=await runStage(restoreStage,2*MINUTE);results.push(restore);log("shark_scout_stage_finished",restore);if(restore.status==="SUCCESS"){canonicalSnapshotTaken=false;return true;}log("shark_scout_emergency_restore_failed",{reason,restore});return false;};
+
+  for(const stage of stages){
+    if(stage.phase!==lastPhase){lastPhase=stage.phase;log("shark_scout_phase_started",{phase:lastPhase,elapsedMs:Date.now()-pipelineStarted,remainingMs:deadline-Date.now(),pressure,discoverySpentMs,canonicalResearchSpentMs});}
+    const remaining=Math.max(0,deadline-Date.now());
+    if(stage.workClass==="COLD"&&remaining<=FINALIZE_RESERVE_MS){const r=skipped(stage,"SKIPPED_BUDGET","FINALIZE_RESERVE");results.push(r);log("shark_scout_stage_finished",r);continue;}
+    if(stage.workClass==="COLD"&&stage.phase==="DISCOVERY"&&discoverySpentMs>=DISCOVERY_BUDGET_MS){const r=skipped(stage,"SKIPPED_BUDGET","DISCOVERY_BUDGET_EXHAUSTED");results.push(r);log("shark_scout_stage_finished",r);continue;}
+    if(stage.workClass==="COLD"&&stage.phase==="CANONICAL"&&canonicalResearchSpentMs>=CANONICAL_RESEARCH_BUDGET_MS){const r=skipped(stage,"SKIPPED_BUDGET","CANONICAL_RESEARCH_BUDGET_EXHAUSTED");results.push(r);log("shark_scout_stage_finished",r);continue;}
+    if(stage.name==="canonical_snapshot_pre"&&remaining<=FINALIZE_RESERVE_MS+3*MINUTE){const r=skipped(stage,"SKIPPED_BUDGET","CANONICAL_RESERVE");results.push(r);log("shark_scout_stage_finished",r);continue;}
+    if(protectedCanonicalStages.has(stage.name)&&!canonicalSnapshotTaken){const r=skipped(stage,"SKIPPED_BUDGET","CANONICAL_SNAPSHOT_UNAVAILABLE");results.push(r);log("shark_scout_stage_finished",r);continue;}
+    const due=cadenceDue(stage,cadenceState);if(!due.due){const r=skipped(stage,"SKIPPED_EVENT","CADENCE_NOT_DUE");results.push(r);log("shark_scout_lean_stage_deferred",{stage:stage.name,nextAt:due.nextAt,ageMs:due.ageMs,cadenceHours:stage.cadenceHours});log("shark_scout_stage_finished",r);continue;}
+    if(eventRefreshStages.has(stage.name)&&!hotRefreshNeeded()){const r=skipped(stage,"SKIPPED_EVENT","NO_HOT_EVENT");results.push(r);log("shark_scout_stage_finished",r);continue;}
+    const heliusCircuit=heliusHardQuotaCoolingDown();if(stage.workClass==="COLD"&&heliusCircuit&&providerSensitiveCold.has(stage.name)){pressure=pressure==="RED"?"RED":"YELLOW";if(providerSensitiveDiscovery.has(stage.name)){const r=skipped(stage,"SKIPPED_PROVIDER","RECENT_PROVIDER_QUOTA_PRESSURE");results.push(r);log("shark_scout_stage_finished",r);continue;}}
+    if(pressure==="RED"&&stage.workClass==="COLD"){const r=skipped(stage,"SKIPPED_PROVIDER","PROVIDER_PRESSURE_RED");results.push(r);log("shark_scout_stage_finished",r);continue;}
+    if(pressure==="YELLOW"&&providerSensitiveDiscovery.has(stage.name)){const r=skipped(stage,"SKIPPED_PROVIDER","PROVIDER_PRESSURE_YELLOW_SHED_DISCOVERY");results.push(r);log("shark_scout_stage_finished",r);continue;}
+
+    const reserved=stage.workClass==="HOT"||stage.workClass==="SYSTEM"?0:FINALIZE_RESERVE_MS;
+    let phaseBudget=Infinity;
+    if(stage.workClass==="COLD"&&stage.phase==="DISCOVERY")phaseBudget=Math.max(0,DISCOVERY_BUDGET_MS-discoverySpentMs);
+    if(stage.workClass==="COLD"&&stage.phase==="CANONICAL")phaseBudget=Math.max(0,CANONICAL_RESEARCH_BUDGET_MS-canonicalResearchSpentMs);
+    const allowed=Math.max(1000,Math.min(stage.timeoutMs,deadline-Date.now()-reserved,phaseBudget));
+    const result=await runStage(stage,allowed);results.push(result);log("shark_scout_stage_finished",result);
+    if(stage.workClass==="COLD"&&stage.phase==="DISCOVERY")discoverySpentMs+=result.durationMs;
+    if(stage.workClass==="COLD"&&stage.phase==="CANONICAL")canonicalResearchSpentMs+=result.durationMs;
+    if(result.status==="SUCCESS")markCadenceSuccess(stage,cadenceState);
+    if(stage.name==="canonical_snapshot_pre"&&result.status==="SUCCESS")canonicalSnapshotTaken=true;
+    if(stage.name==="canonical_restore"&&result.status==="SUCCESS")canonicalSnapshotTaken=false;
+    if(stage.workClass==="COLD"&&(result.status==="FAILED")){coldFailures++;pressure=coldFailures>=2?"RED":"YELLOW";log("shark_scout_provider_pressure_changed",{pressure,coldFailures,triggerStage:stage.name,triggerStatus:result.status});}
+    if(result.status!=="SUCCESS"&&result.status!=="SKIPPED_EVENT"&&result.status!=="SKIPPED_PROVIDER"&&!stage.continueOnFailure){const restored=await emergencyRestore(`critical_stage_${stage.name}_${result.status}`);const finishedAt=new Date().toISOString();const truth=persistPipelineTruth({status:"ABORTED",startedAt,finishedAt,durationMs:Date.now()-pipelineStarted,stageCount:results.length,failedCount:1,failedStage:stage.name,failedStatus:result.status,emergencyRestoreOk:restored,pressure,stageResults:results});await publishPipelineTruth(truth);process.exitCode=1;return;}
+  }
+
+  if(canonicalSnapshotTaken){const restored=await emergencyRestore("pipeline_end_snapshot_open");if(!restored)process.exitCode=1;}
+  const failed=results.filter(x=>x.status==="FAILED"||x.status==="TIMED_OUT"),skippedBudget=results.filter(x=>x.status==="SKIPPED_BUDGET"),skippedEvent=results.filter(x=>x.status==="SKIPPED_EVENT"),skippedProvider=results.filter(x=>x.status==="SKIPPED_PROVIDER"),executed=results.filter(x=>x.execution==="EXECUTED"),durationMs=Date.now()-pipelineStarted,finishedAt=new Date().toISOString(),researchHealth=researchCoreHealth();
+  const degraded=skippedProvider.length>0||skippedBudget.length>0||researchHealth.status==="DEGRADED";const status=failed.length?"COMPLETE_WITH_FAILURES":degraded?"COMPLETE_DEGRADED":"COMPLETE";
+  const usefulExecuted=executed.filter(x=>x.workClass==="HOT"||x.workClass==="SYSTEM"||x.status==="SUCCESS").length;
+  const runQuality={executedStages:executed.length,usefulExecutedStages:usefulExecuted,skippedStages:results.length-executed.length,providerSkipped:skippedProvider.length,budgetSkipped:skippedBudget.length,eventSkipped:skippedEvent.length,researchCoreHealth:researchHealth.status,researchCoreDegradedReasons:researchHealth.degradedReasons,providerPressure:pressure,discoverySpentMs,canonicalResearchSpentMs,decisionValueMode:true,note:"v0.51 intentionally prefers live/follower truth and bounded high-impact research over backlog completeness; cadence and budget skips can be healthy outcomes."};
+  const summary={startedAt,finishedAt,durationMs,stageCount:results.length,failedCount:failed.length,skippedBudgetCount:skippedBudget.length,skippedEventCount:skippedEvent.length,skippedProviderCount:skippedProvider.length,failedStages:failed,skippedStages:skippedBudget.map(x=>({name:x.name,workClass:x.workClass,reason:x.degradedReason})),eventSkippedStages:skippedEvent.map(x=>({name:x.name,reason:x.degradedReason})),providerSkippedStages:skippedProvider.map(x=>({name:x.name,reason:x.degradedReason})),runQuality,stageResults:results};
+  const truth=persistPipelineTruth({status,...summary});const telemetryPublished=await publishPipelineTruth(truth);log("shark_scout_pipeline_complete",{status,...summary,telemetryPublished});if(failed.length&&process.exitCode!==1)process.exitCode=2;
+}
+
 main().catch(async(e)=>{const error=String(e),finishedAt=new Date().toISOString();const truth=persistPipelineTruth({status:"FATAL",startedAt:null,finishedAt,error});await publishPipelineTruth(truth);console.error(JSON.stringify({level:"error",event:"shark_scout_pipeline_fatal",at:finishedAt,error}));process.exitCode=1;});
