@@ -31,7 +31,8 @@ export function normalizeRawTransaction(tx:any,address:string,signature:string){
   const nativeOutput=nativeTradeLam>0?{amount:Math.round(nativeTradeLam)}:wsol>0?{amount:Math.round(wsol*1e9)}:undefined;
   const tokenTransfers=deltas.map(x=>x.delta>0?{mint:x.mint,toUserAccount:address,fromUserAccount:null,tokenAmount:x.delta}:{mint:x.mint,fromUserAccount:address,toUserAccount:null,tokenAmount:Math.abs(x.delta)});
   const nativeTransfers:any[]=[];if(nativeInput)nativeTransfers.push({fromUserAccount:address,toUserAccount:null,amount:nativeInput.amount});if(nativeOutput)nativeTransfers.push({fromUserAccount:null,toUserAccount:address,amount:nativeOutput.amount});
-  return{signature,timestamp:Number(tx?.blockTime||0),slot:Number(tx?.slot||0),fee:Number(tx?.meta?.fee||0),source:"provider_fabric_raw",events:{swap:{tokenInputs,tokenOutputs,nativeInput,nativeOutput}},tokenTransfers,nativeTransfers,_normalized:{address,tokenDeltas:deltas,nativeSolDelta:rawDelta/1e9,feeSol:feeLam/1e9}};
+  const swapLike=(tokenInputs.length===1&&Boolean(nativeOutput))||(tokenOutputs.length===1&&Boolean(nativeInput));
+  return{signature,timestamp:Number(tx?.blockTime||0),slot:Number(tx?.slot||0),fee:Number(tx?.meta?.fee||0),type:swapLike?"SWAP":"UNKNOWN",source:"provider_fabric_raw",events:{swap:{tokenInputs,tokenOutputs,nativeInput,nativeOutput}},tokenTransfers,nativeTransfers,_normalized:{address,tokenDeltas:deltas,nativeSolDelta:rawDelta/1e9,feeSol:feeLam/1e9}};
 }
 
 export async function fetchNormalizedTransaction(signature:string,address:string){
