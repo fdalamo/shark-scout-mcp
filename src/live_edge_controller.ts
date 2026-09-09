@@ -26,7 +26,8 @@ export async function buildLiveEdgeController(){
   const [odin,truth,paper]=await Promise.all([read(ODIN_PATH,{}),read(TRUTH_PATH,{entries:{}}),read(PAPER_REPORT_PATH,{wallets:[]})]);
   const liveMirrors=(Array.isArray(odin?.mirrors)?odin.mirrors:[]).map((x:any)=>String(x?.address||x?.wallet||x?.sourceWallet||"")).filter(Boolean);
   const truthEntries=Object.values(truth?.entries||{}) as AnyObj[];
-  const paperWallets=new Map<string,AnyObj>((Array.isArray(paper?.wallets)?paper.wallets:[]).map((x:any)=>[String(x?.address||x?.wallet||""),x]));
+  const paperPairs:[string,AnyObj][]=(Array.isArray(paper?.wallets)?paper.wallets:[]).map((x:any)=>[String(x?.address||x?.wallet||""),x] as [string,AnyObj]);
+  const paperWallets=new Map<string,AnyObj>(paperPairs);
   const scorecards=liveMirrors.map(address=>{
     const rows=truthEntries.filter(x=>String(x?.mirror||"")===address);
     const pw=paperWallets.get(address)||{};
