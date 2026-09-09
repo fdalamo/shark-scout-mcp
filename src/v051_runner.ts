@@ -8,6 +8,9 @@ import { buildHourlyIntelligenceReport } from "./hourly_intelligence_report.js";
 
 const MINUTE=60_000;
 const QUOTA_PATH=process.env.SCOUT_QUOTA_SHIELD_PATH||"/data/quota-shield-summary.json";
+const CRON_INTEGRITY_PATH=process.env.SCOUT_CRON_INTEGRITY_PATH||"/data/cron-integrity-state.json";
+const CRON_WATCHDOG_MS=Math.min(30*MINUTE,Math.max(20*MINUTE,Number(process.env.SCOUT_CRON_WATCHDOG_MS||25*MINUTE)));
+const MISSED_TICK_THRESHOLD_MS=90*MINUTE;
 
 type QuotaPressure={
   total:number;
@@ -18,11 +21,28 @@ type QuotaPressure={
   samples:string[];
 };
 
+type CronIntegrityState={
+  schema:number;
+  lastRunId?:string;
+  lastRunStartedAt?:string;
+  lastRunFinishedAt?:string;
+  lastSuccessfulReportAt?:string;
+  lastExitCode?:number;
+  lastOutcome?:"RUN_COMPLETED"|"RUN_TIMED_OUT"|"RUN_FAILED";
+  previousTickMissed?:boolean;
+  runtimeMs?:number;
+};
+
 async function atomic(file:string,data:any){
   await fs.mkdir(path.dirname(file),{recursive:true});
   const tmp=`${file}.${process.pid}.tmp`;
   await fs.writeFile(tmp,JSON.stringify(data,null,2));
   await fs.rename(tmp,file);
+}
+
+async function readJson<T>(file:string):Promise<T|null>{
+  try{return JSON.parse(await fs.readFile(file,"utf8")) as T;}
+  catch{return null;}
 }
 
 function clampNumber(value:string|undefined,fallback:number,min:number,max:number){
@@ -93,7 +113,7 @@ async function runPipeline(){
   const env=envWithLeanGuardrails();
   console.log(JSON.stringify({
     event:"shark_scout_v051_guardrails",
-    patch:"0.52-hourly-intelligence-report",
+    patch:"0.52.1-cron-integrity-guard",
     operatingScale:"~1_SOL",
     principle:"HOT truth first; cheap exploration preserved; expensive work must earn runtime",
     pipelineBudgetMs:Number(env.HARVEST_PIPELINE_BUDGET_MS),
@@ -110,6 +130,7 @@ async function runPipeline(){
     opportunityDebt:true,
     quotaShield:true,
     hourlyIntelligenceReport:true,
+    cronIntegrityGuard:true,
     liveOdinMutation:false
   }));
   const q:QuotaPressure={total:0,http429:0,maxUsage:0,rateLimit:0,computeOrRps:0,samples:[]};
@@ -134,15 +155,65 @@ async function runPipeline(){
 }
 
 async function main(){
-  await refreshTruthSurface("pre");
-  const code=await runPipeline();
-  await refreshTruthSurface("post");
-  try{await buildHourlyIntelligenceReport();}
-  catch(e){console.log(JSON.stringify({event:"shark_scout_hourly_intelligence_report_degraded",error:e instanceof Error?e.message:String(e)}));}
-  process.exitCode=code;
+  const runId=`${Date.now()}-${process.pid}`;
+  const startedAt=new Date();
+  const previous=await readJson<CronIntegrityState>(CRON_INTEGRITY_PATH);
+  const previousStartedMs=previous?.lastRunStartedAt?Date.parse(previous.lastRunStartedAt):NaN;
+  const previousFinishedMs=previous?.lastRunFinishedAt?Date.parse(previous.lastRunFinishedAt):NaN;
+  const previousIncomplete=Number.isFinite(previousStartedMs)&&(!Number.isFinite(previousFinishedMs)||previousFinishedMs<previousStartedMs);
+  const missedByGap=Number.isFinite(previousStartedMs)&&(startedAt.getTime()-previousStartedMs)>MISSED_TICK_THRESHOLD_MS;
+  const previousTickMissed=previousIncomplete||missedByGap;
+
+  const startState:CronIntegrityState={
+    ...(previous||{schema:1}),
+    schema:1,
+    lastRunId:runId,
+    lastRunStartedAt:startedAt.toISOString(),
+    previousTickMissed
+  };
+  await atomic(CRON_INTEGRITY_PATH,startState);
+  console.log(JSON.stringify({event:"shark_scout_cron_run_started",runId,startedAt:startedAt.toISOString(),previousTickMissed,previousIncomplete,missedByGap,watchdogMs:CRON_WATCHDOG_MS}));
+  if(previousTickMissed)console.log(JSON.stringify({event:"shark_scout_previous_tick_missed",runId,previousLastStartedAt:previous?.lastRunStartedAt||null,previousLastFinishedAt:previous?.lastRunFinishedAt||null}));
+
+  let settled=false;
+  const watchdog=setTimeout(async()=>{
+    if(settled)return;
+    settled=true;
+    const finishedAt=new Date();
+    const timedOut:CronIntegrityState={...startState,lastRunFinishedAt:finishedAt.toISOString(),lastExitCode:124,lastOutcome:"RUN_TIMED_OUT",runtimeMs:finishedAt.getTime()-startedAt.getTime()};
+    try{await atomic(CRON_INTEGRITY_PATH,timedOut);}catch{}
+    console.error(JSON.stringify({event:"shark_scout_cron_run_finished",runId,outcome:"RUN_TIMED_OUT",exitCode:124,runtimeMs:finishedAt.getTime()-startedAt.getTime(),watchdogMs:CRON_WATCHDOG_MS}));
+    process.exit(124);
+  },CRON_WATCHDOG_MS);
+  watchdog.unref();
+
+  let code=1;
+  let reportSucceeded=false;
+  try{
+    await refreshTruthSurface("pre");
+    code=await runPipeline();
+    await refreshTruthSurface("post");
+    try{await buildHourlyIntelligenceReport();reportSucceeded=true;}
+    catch(e){console.log(JSON.stringify({event:"shark_scout_hourly_intelligence_report_degraded",error:e instanceof Error?e.message:String(e)}));}
+  }finally{
+    if(!settled){
+      settled=true;
+      clearTimeout(watchdog);
+      const finishedAt=new Date();
+      const outcome:CronIntegrityState["lastOutcome"]=code===0?"RUN_COMPLETED":"RUN_FAILED";
+      const finishState:CronIntegrityState={...startState,lastRunFinishedAt:finishedAt.toISOString(),lastSuccessfulReportAt:reportSucceeded?finishedAt.toISOString():previous?.lastSuccessfulReportAt,lastExitCode:code,lastOutcome:outcome,runtimeMs:finishedAt.getTime()-startedAt.getTime()};
+      await atomic(CRON_INTEGRITY_PATH,finishState);
+      console.log(JSON.stringify({event:"shark_scout_cron_run_finished",runId,outcome,exitCode:code,runtimeMs:finishState.runtimeMs,reportSucceeded,previousTickMissed}));
+    }
+  }
+  process.exit(code);
 }
 
-main().catch(e=>{
+main().catch(async e=>{
   console.error(JSON.stringify({event:"shark_scout_v051_runner_failed",error:e instanceof Error?e.message:String(e)}));
-  process.exitCode=1;
+  try{
+    const previous=await readJson<CronIntegrityState>(CRON_INTEGRITY_PATH);
+    await atomic(CRON_INTEGRITY_PATH,{...(previous||{schema:1}),lastRunFinishedAt:new Date().toISOString(),lastExitCode:1,lastOutcome:"RUN_FAILED"});
+  }catch{}
+  process.exit(1);
 });
