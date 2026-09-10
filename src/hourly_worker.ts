@@ -1,6 +1,5 @@
 import { ChildProcess, spawn } from "node:child_process";
 
-const HOUR_MS = 60 * 60 * 1000;
 const PATCH = "0.53.0-hourly-worker";
 const RUNNER = "dist/cron_supervisor.js";
 
@@ -91,7 +90,6 @@ function scheduleNext() {
     await runOnce("scheduled");
     scheduleNext();
   }, delayMs);
-  nextTimer.unref?.();
 }
 
 async function shutdown(signal: NodeJS.Signals) {
@@ -131,6 +129,6 @@ emit("shark_scout_hourly_worker_started", {
   runner: RUNNER
 });
 
-// The worker intentionally stays alive. On a fresh deploy it waits for the next
-// top-of-hour boundary so a deployment does not create an unscheduled duplicate run.
+// Intentionally wait for the next top-of-hour boundary after a deployment so
+// the deployment itself cannot create an unscheduled duplicate Shark Scout run.
 scheduleNext();
