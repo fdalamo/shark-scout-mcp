@@ -8,11 +8,12 @@ export type SupervisedExit={
 };
 
 function isPosix(){return process.platform!=="win32";}
+function nestedProcessGroupsEnabled(){return process.env.SCOUT_NESTED_PROCESS_GROUPS!=="0";}
 
 export function signalProcessTree(child:ChildProcess,signal:NodeJS.Signals){
   if(!child.pid||child.exitCode!==null)return false;
   try{
-    if(isPosix()) process.kill(-child.pid,signal);
+    if(isPosix()&&nestedProcessGroupsEnabled()) process.kill(-child.pid,signal);
     else child.kill(signal);
     return true;
   }catch{
@@ -22,7 +23,8 @@ export function signalProcessTree(child:ChildProcess,signal:NodeJS.Signals){
 }
 
 export function spawnProcessTree(command:string,args:string[],options:SpawnOptions={}){
-  return spawn(command,args,{...options,detached:isPosix()});
+  const detached=options.detached??(isPosix()&&nestedProcessGroupsEnabled());
+  return spawn(command,args,{...options,detached});
 }
 
 export async function terminateProcessTree(child:ChildProcess,graceMs=4_000){
