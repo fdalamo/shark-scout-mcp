@@ -1,7 +1,12 @@
 import { ChildProcess, spawn } from "node:child_process";
 
-const PATCH = "0.53.0-hourly-worker";
+const PATCH = "0.53.1-mission-reset";
 const RUNNER = "dist/cron_supervisor.js";
+const POST_PROCESSORS = [
+  ["odin_actual_reconciler", "dist/odin_actual_reconciler.js"],
+  ["replacement_ladder", "dist/replacement_ladder.js"],
+  ["mission_report", "dist/mission_report.js"]
+] as const;
 
 let current: ChildProcess | null = null;
 let shuttingDown = false;
@@ -29,6 +34,26 @@ function nextHourDelayMs(now = new Date()) {
   return Math.max(1_000, next.getTime() - now.getTime());
 }
 
+async function runChild(label:string, script:string){
+  if(shuttingDown)return {label,status:"SKIPPED_SHUTDOWN",exitCode:null as number|null,runtimeMs:0};
+  const startedAt=Date.now();
+  emit("shark_scout_hourly_worker_stage_started",{label,script});
+  const child=spawn(process.execPath,[script],{stdio:"inherit",env:process.env});
+  current=child;
+  return await new Promise<{label:string;status:string;exitCode:number|null;runtimeMs:number}>((resolve)=>{
+    let settled=false;
+    const finish=(status:string,exitCode:number|null,error?:string)=>{
+      if(settled)return;settled=true;
+      const runtimeMs=Date.now()-startedAt;
+      emit("shark_scout_hourly_worker_stage_finished",{label,script,status,exitCode,runtimeMs,error:error||null});
+      if(current===child)current=null;
+      resolve({label,status,exitCode,runtimeMs});
+    };
+    child.once("error",e=>finish("SPAWN_ERROR",1,e.message));
+    child.once("close",code=>finish(code===0?"SUCCESS":"FAILED",code??1));
+  });
+}
+
 async function runOnce(trigger: "scheduled" | "startup_recovery") {
   if (shuttingDown) return;
   if (current) {
@@ -47,33 +72,22 @@ async function runOnce(trigger: "scheduled" | "startup_recovery") {
   }
   lastSlot = slot;
 
-  emit("shark_scout_hourly_worker_run_started", { trigger, slot, runner: RUNNER });
+  emit("shark_scout_hourly_worker_run_started", { trigger, slot, runner: RUNNER,postProcessors:POST_PROCESSORS.map(x=>x[0]) });
   const startedAt = Date.now();
-
-  const child = spawn(process.execPath, [RUNNER], {
-    stdio: "inherit",
-    env: process.env
-  });
-  current = child;
-
-  await new Promise<void>((resolve) => {
-    let settled = false;
-    const finish = (result: Record<string, unknown>) => {
-      if (settled) return;
-      settled = true;
-      const runtimeMs = Date.now() - startedAt;
-      emit("shark_scout_hourly_worker_run_finished", {
-        slot,
-        runtimeMs,
-        childPid: child.pid ?? null,
-        ...result
-      });
-      current = null;
-      resolve();
-    };
-
-    child.once("error", (error) => finish({ status: "SPAWN_ERROR", error: error.message }));
-    child.once("close", (code, signal) => finish({ status: "CLOSED", exitCode: code, signal }));
+  const runnerResult=await runChild("shark_scout_runner",RUNNER);
+  const postResults=[];
+  if(!shuttingDown){
+    for(const [label,script] of POST_PROCESSORS){
+      try{postResults.push(await runChild(label,script));}
+      catch(e){emit("shark_scout_hourly_worker_postprocessor_exception",{label,error:e instanceof Error?e.message:String(e)});}
+    }
+  }
+  emit("shark_scout_hourly_worker_run_finished", {
+    slot,
+    runtimeMs: Date.now()-startedAt,
+    runnerResult,
+    postResults,
+    missionReset:true
   });
 }
 
@@ -126,9 +140,8 @@ emit("shark_scout_hourly_worker_started", {
   ppid: process.ppid,
   schedule: "top_of_every_hour_utc_equivalent",
   noOverlap: true,
-  runner: RUNNER
+  runner: RUNNER,
+  postProcessors:POST_PROCESSORS.map(x=>x[0])
 });
 
-// Intentionally wait for the next top-of-hour boundary after a deployment so
-// the deployment itself cannot create an unscheduled duplicate Shark Scout run.
 scheduleNext();
