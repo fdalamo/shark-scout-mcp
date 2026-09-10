@@ -1,16 +1,21 @@
-import { spawn } from "node:child_process";
+import { ChildProcess } from "node:child_process";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { buildLiveEdgeController } from "./live_edge_controller.js";
 import { buildFollowerPolicyLedger } from "./follower_policy_ledger.js";
 import { buildOpportunityDebt } from "./opportunity_debt.js";
 import { buildHourlyIntelligenceReport } from "./hourly_intelligence_report.js";
+import { spawnProcessTree, terminateProcessTree } from "./process_supervisor.js";
 
 const MINUTE=60_000;
 const QUOTA_PATH=process.env.SCOUT_QUOTA_SHIELD_PATH||"/data/quota-shield-summary.json";
 const CRON_INTEGRITY_PATH=process.env.SCOUT_CRON_INTEGRITY_PATH||"/data/cron-integrity-state.json";
 const CRON_WATCHDOG_MS=Math.min(30*MINUTE,Math.max(20*MINUTE,Number(process.env.SCOUT_CRON_WATCHDOG_MS||25*MINUTE)));
 const MISSED_TICK_THRESHOLD_MS=90*MINUTE;
+const PROCESS_KILL_GRACE_MS=Math.max(1_000,Math.min(8_000,Number(process.env.SCOUT_PROCESS_KILL_GRACE_MS||4_000)));
+
+let activePipeline:ChildProcess|null=null;
+let externalShutdownStarted=false;
 
 type QuotaPressure={
   total:number;
@@ -109,11 +114,20 @@ function teeAndInspect(chunk:any,target:NodeJS.WriteStream,q:QuotaPressure){
   for(const line of text.split(/\r?\n/))if(line)inspectQuota(line,q);
 }
 
+async function stopActivePipeline(reason:string){
+  const child=activePipeline;
+  if(!child||child.exitCode!==null)return {termSent:false,killSent:false};
+  console.error(JSON.stringify({event:"shark_scout_pipeline_cleanup_started",reason,pid:child.pid,graceMs:PROCESS_KILL_GRACE_MS,at:new Date().toISOString()}));
+  const result=await terminateProcessTree(child,PROCESS_KILL_GRACE_MS);
+  console.error(JSON.stringify({event:"shark_scout_pipeline_cleanup_finished",reason,pid:child.pid,...result,exitCode:child.exitCode,signalCode:child.signalCode,at:new Date().toISOString()}));
+  return result;
+}
+
 async function runPipeline(){
   const env=envWithLeanGuardrails();
   console.log(JSON.stringify({
     event:"shark_scout_v051_guardrails",
-    patch:"0.52.1-cron-integrity-guard",
+    patch:"0.52.2-hard-wall-clock",
     operatingScale:"~1_SOL",
     principle:"HOT truth first; cheap exploration preserved; expensive work must earn runtime",
     pipelineBudgetMs:Number(env.HARVEST_PIPELINE_BUDGET_MS),
@@ -131,15 +145,22 @@ async function runPipeline(){
     quotaShield:true,
     hourlyIntelligenceReport:true,
     cronIntegrityGuard:true,
+    processTreeGuard:true,
     liveOdinMutation:false
   }));
   const q:QuotaPressure={total:0,http429:0,maxUsage:0,rateLimit:0,computeOrRps:0,samples:[]};
   const code=await new Promise<number>((resolve,reject)=>{
-    const child=spawn(process.execPath,["dist/harvest_pipeline.js"],{stdio:["inherit","pipe","pipe"],env});
+    const child=spawnProcessTree(process.execPath,["dist/harvest_pipeline.js"],{stdio:["ignore","pipe","pipe"],env});
+    activePipeline=child;
+    console.log(JSON.stringify({event:"shark_scout_pipeline_process_started",pid:child.pid,detached:process.platform!=="win32",at:new Date().toISOString()}));
     child.stdout?.on("data",chunk=>teeAndInspect(chunk,process.stdout,q));
     child.stderr?.on("data",chunk=>teeAndInspect(chunk,process.stderr,q));
-    child.on("error",reject);
-    child.on("exit",exitCode=>resolve(exitCode??1));
+    child.once("error",e=>{if(activePipeline===child)activePipeline=null;reject(e);});
+    child.once("close",exitCode=>{
+      if(activePipeline===child)activePipeline=null;
+      console.log(JSON.stringify({event:"shark_scout_pipeline_process_closed",pid:child.pid,exitCode:exitCode??1,signalCode:child.signalCode,at:new Date().toISOString()}));
+      resolve(exitCode??1);
+    });
   });
   const summary={
     event:"shark_scout_quota_shield_summary",
@@ -172,26 +193,45 @@ async function main(){
     previousTickMissed
   };
   await atomic(CRON_INTEGRITY_PATH,startState);
-  console.log(JSON.stringify({event:"shark_scout_cron_run_started",runId,startedAt:startedAt.toISOString(),previousTickMissed,previousIncomplete,missedByGap,watchdogMs:CRON_WATCHDOG_MS}));
+  console.log(JSON.stringify({event:"shark_scout_cron_run_started",runId,startedAt:startedAt.toISOString(),previousTickMissed,previousIncomplete,missedByGap,watchdogMs:CRON_WATCHDOG_MS,processTreeGuard:true}));
   if(previousTickMissed)console.log(JSON.stringify({event:"shark_scout_previous_tick_missed",runId,previousLastStartedAt:previous?.lastRunStartedAt||null,previousLastFinishedAt:previous?.lastRunFinishedAt||null}));
 
   let settled=false;
   const watchdog=setTimeout(async()=>{
     if(settled)return;
     settled=true;
+    const watchdogAt=Date.now();
+    console.error(JSON.stringify({event:"shark_scout_cron_watchdog_fired",runId,runtimeMs:watchdogAt-startedAt.getTime(),watchdogMs:CRON_WATCHDOG_MS,at:new Date(watchdogAt).toISOString()}));
+    try{await stopActivePipeline("cron_watchdog");}catch(e){console.error(JSON.stringify({event:"shark_scout_pipeline_cleanup_failed",reason:"cron_watchdog",error:e instanceof Error?e.message:String(e)}));}
     const finishedAt=new Date();
     const timedOut:CronIntegrityState={...startState,lastRunFinishedAt:finishedAt.toISOString(),lastExitCode:124,lastOutcome:"RUN_TIMED_OUT",runtimeMs:finishedAt.getTime()-startedAt.getTime()};
     try{await atomic(CRON_INTEGRITY_PATH,timedOut);}catch{}
-    console.error(JSON.stringify({event:"shark_scout_cron_run_finished",runId,outcome:"RUN_TIMED_OUT",exitCode:124,runtimeMs:finishedAt.getTime()-startedAt.getTime(),watchdogMs:CRON_WATCHDOG_MS}));
+    console.error(JSON.stringify({event:"shark_scout_cron_run_finished",runId,outcome:"RUN_TIMED_OUT",exitCode:124,runtimeMs:timedOut.runtimeMs,watchdogMs:CRON_WATCHDOG_MS}));
+    console.error(JSON.stringify({event:"shark_scout_process_exiting",runId,exitCode:124,reason:"cron_watchdog",at:new Date().toISOString()}));
     process.exit(124);
   },CRON_WATCHDOG_MS);
-  watchdog.unref();
+
+  const externalShutdown=async(signal:NodeJS.Signals)=>{
+    if(externalShutdownStarted)return;
+    externalShutdownStarted=true;
+    settled=true;
+    clearTimeout(watchdog);
+    console.error(JSON.stringify({event:"shark_scout_external_shutdown_started",runId,signal,at:new Date().toISOString()}));
+    try{await stopActivePipeline(`external_${signal}`);}catch{}
+    const finishedAt=new Date();
+    try{await atomic(CRON_INTEGRITY_PATH,{...startState,lastRunFinishedAt:finishedAt.toISOString(),lastExitCode:143,lastOutcome:"RUN_FAILED",runtimeMs:finishedAt.getTime()-startedAt.getTime()});}catch{}
+    console.error(JSON.stringify({event:"shark_scout_process_exiting",runId,exitCode:143,reason:signal,at:new Date().toISOString()}));
+    process.exit(143);
+  };
+  process.once("SIGTERM",()=>void externalShutdown("SIGTERM"));
+  process.once("SIGINT",()=>void externalShutdown("SIGINT"));
 
   let code=1;
   let reportSucceeded=false;
   try{
     await refreshTruthSurface("pre");
     code=await runPipeline();
+    if(settled)return;
     await refreshTruthSurface("post");
     try{await buildHourlyIntelligenceReport();reportSucceeded=true;}
     catch(e){console.log(JSON.stringify({event:"shark_scout_hourly_intelligence_report_degraded",error:e instanceof Error?e.message:String(e)}));}
@@ -206,14 +246,17 @@ async function main(){
       console.log(JSON.stringify({event:"shark_scout_cron_run_finished",runId,outcome,exitCode:code,runtimeMs:finishState.runtimeMs,reportSucceeded,previousTickMissed}));
     }
   }
+  console.log(JSON.stringify({event:"shark_scout_process_exiting",runId,exitCode:code,reason:"normal_completion",at:new Date().toISOString()}));
   process.exit(code);
 }
 
 main().catch(async e=>{
   console.error(JSON.stringify({event:"shark_scout_v051_runner_failed",error:e instanceof Error?e.message:String(e)}));
+  try{await stopActivePipeline("top_level_failure");}catch{}
   try{
     const previous=await readJson<CronIntegrityState>(CRON_INTEGRITY_PATH);
     await atomic(CRON_INTEGRITY_PATH,{...(previous||{schema:1}),lastRunFinishedAt:new Date().toISOString(),lastExitCode:1,lastOutcome:"RUN_FAILED"});
   }catch{}
+  console.error(JSON.stringify({event:"shark_scout_process_exiting",exitCode:1,reason:"top_level_failure",at:new Date().toISOString()}));
   process.exit(1);
 });
