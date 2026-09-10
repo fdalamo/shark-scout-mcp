@@ -5,7 +5,7 @@ import path from "node:path";
 const MINUTE=60_000;
 const HARD_DEADLINE_MS=Math.min(30*MINUTE,Math.max(20*MINUTE,Number(process.env.SCOUT_CRON_HARD_DEADLINE_MS||25*MINUTE)));
 const TERM_GRACE_MS=Math.max(2_000,Math.min(10_000,Number(process.env.SCOUT_CRON_SUPERVISOR_TERM_GRACE_MS||5_000)));
-const PATCH="0.52.5-lifecycle-diagnostic";
+const PATCH="0.52.5-lifecycle-diagnostic-clean-config";
 const POSIX=process.platform!=="win32";
 const STATE_PATH=process.env.SCOUT_CRON_SUPERVISOR_STATE_PATH||"/data/cron-supervisor-state.json";
 const DIAGNOSTIC_PATH=process.env.SCOUT_CRON_LIFECYCLE_DIAGNOSTIC_PATH||"/data/cron-lifecycle-diagnostic.json";
