@@ -48,17 +48,27 @@ async function mergeOutcomeTmp(){
 }
 
 function stamp(x:any){return String(x?.telemetry?.finishedAt||x?.finishedAt||x?.updatedAt||"")||null;}
+function latestOutcome(x:any){return x?.last||((Array.isArray(x?.runs)&&x.runs.length)?x.runs[x.runs.length-1]:null)||null;}
+function outcomeReportMatchesCoreRun(truth:any,outcome:any){
+  const coreStarted=Date.parse(String(truth?.startedAt||""));
+  const reportFinished=Date.parse(String(stamp(latestOutcome(outcome))||""));
+  return Number.isFinite(coreStarted)&&Number.isFinite(reportFinished)&&reportFinished>=coreStarted;
+}
 
 async function main(){
-  const startedAt=now(),truth=await json(PIPELINE_TRUTH,{});
+  const startedAt=now(),truth=await json(PIPELINE_TRUTH,{}),existingOutcome=await json(REAL_OUT,{runs:[]});
   const coreOutcome=freshCoreResult(truth,"outcome_miner_v2"),coreHarvest=freshCoreResult(truth,"harvest_scout");
+  const coreOutcomeEvidenceFresh=outcomeReportMatchesCoreRun(truth,existingOutcome);
 
   let outcome:RunResult,outcomeMerge:any;
-  if(coreOutcome?.status==="SUCCESS"){
+  if(coreOutcome?.status==="SUCCESS"&&coreOutcomeEvidenceFresh){
     outcome={label:"outcome_miner_hourly",status:"SKIPPED_CORE_SUCCESS",exitCode:0,runtimeMs:0};
-    outcomeMerge={merged:false,reason:"CORE_ALREADY_SUCCEEDED"};
-    emit("shark_scout_mission_discovery_stage_skipped",{label:outcome.label,reason:"CORE_ALREADY_SUCCEEDED",coreDurationMs:coreOutcome.durationMs??null});
+    outcomeMerge={merged:false,reason:"CORE_ALREADY_SUCCEEDED_WITH_FRESH_REPORT"};
+    emit("shark_scout_mission_discovery_stage_skipped",{label:outcome.label,reason:"CORE_ALREADY_SUCCEEDED_WITH_FRESH_REPORT",coreDurationMs:coreOutcome.durationMs??null,coreOutcomeEvidenceFresh:true,coreOutcomeReportFinishedAt:stamp(latestOutcome(existingOutcome))});
   }else{
+    if(coreOutcome?.status==="SUCCESS"&&!coreOutcomeEvidenceFresh){
+      emit("shark_scout_mission_discovery_core_outcome_false_success",{coreDurationMs:coreOutcome.durationMs??null,coreFinishedAt:truth?.finishedAt||null,coreOutcomeReportFinishedAt:stamp(latestOutcome(existingOutcome)),reason:"CORE_STAGE_SUCCESS_WITHOUT_CURRENT_RUN_OUTCOME_REPORT",recovery:"RUN_INDEPENDENT_OUTCOME_MINER"});
+    }
     await atomic(TMP_OUT,{runs:[]});
     outcome=await run("outcome_miner_hourly","dist/outcome_miner_v2.js",105_000,{
       SCOUT_OUTCOME_MINER_PATH:TMP_OUT,
@@ -71,7 +81,7 @@ async function main(){
     outcomeMerge=outcome.status==="SUCCESS"?await mergeOutcomeTmp():{merged:false,reason:outcome.status};
   }
 
-  const outcomeUseful=outcome.status==="SUCCESS"||outcome.status==="SKIPPED_CORE_SUCCESS";
+  const outcomeUseful=outcome.status==="SUCCESS"||(outcome.status==="SKIPPED_CORE_SUCCESS"&&coreOutcomeEvidenceFresh);
   const freshOutcomeAdded=outcome.status==="SUCCESS"&&Boolean(outcomeMerge?.merged)&&(Number(outcomeMerge?.newWallets||0)>0||Number(outcomeMerge?.walletsAdmitted||0)>0);
 
   let harvest:RunResult;
@@ -111,9 +121,9 @@ async function main(){
   }
 
   const harvestUseful=harvest.status==="SUCCESS"||harvest.status==="SKIPPED_CORE_SUCCESS"||harvest.status==="SKIPPED_FRESH_DISCOVERY"||Boolean(harvestProgress.reportAdvanced)||Boolean(harvestProgress.stateAdvanced);
-  const report={schemaVersion:4,patch:"0.55.1-package3-hotfix",startedAt,finishedAt:now(),core:{finishedAt:truth?.finishedAt||null,outcomeStatus:coreOutcome?.status||null,harvestStatus:coreHarvest?.status||null},outcome,outcomeMerge,harvest,harvestProgress,status:(outcomeUseful||harvestUseful)?"DISCOVERY_EXECUTED_OR_CONFIRMED":"DISCOVERY_DEGRADED"};
+  const report={schemaVersion:5,patch:"0.55.10-package310-outcome-truth",startedAt,finishedAt:now(),core:{finishedAt:truth?.finishedAt||null,outcomeStatus:coreOutcome?.status||null,outcomeEvidenceFresh:coreOutcomeEvidenceFresh,outcomeReportFinishedAt:stamp(latestOutcome(existingOutcome)),harvestStatus:coreHarvest?.status||null},outcome,outcomeMerge,harvest,harvestProgress,status:(outcomeUseful||harvestUseful)?"DISCOVERY_EXECUTED_OR_CONFIRMED":"DISCOVERY_DEGRADED"};
   await atomic(REPORT,report);
   emit("shark_scout_mission_discovery_complete",report);
 }
 
-main().catch(async e=>{const report={schemaVersion:4,patch:"0.55.1-package3-hotfix",finishedAt:now(),status:"FAILED",error:e instanceof Error?e.message:String(e)};try{await atomic(REPORT,report);}catch{}console.error(JSON.stringify({event:"shark_scout_mission_discovery_failed",...report}));process.exitCode=1;});
+main().catch(async e=>{const report={schemaVersion:5,patch:"0.55.10-package310-outcome-truth",finishedAt:now(),status:"FAILED",error:e instanceof Error?e.message:String(e)};try{await atomic(REPORT,report);}catch{}console.error(JSON.stringify({event:"shark_scout_mission_discovery_failed",...report}));process.exitCode=1;});
