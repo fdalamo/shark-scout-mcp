@@ -10,7 +10,8 @@ const HARVEST_REPORT=process.env.SCOUT_REPORT_PATH||"/data/latest-harvest.json";
 const SCOUT_STATE=process.env.SCOUT_STATE_PATH||"/data/shark-state.json";
 const CORE_FRESH_MS=15*60_000;
 
-type RunResult={label:string;status:"SUCCESS"|"FAILED"|"TIMED_OUT"|"SKIPPED_CORE_SUCCESS";exitCode:number|null;runtimeMs:number};
+type RunStatus="SUCCESS"|"FAILED"|"TIMED_OUT"|"SKIPPED_CORE_SUCCESS"|"SKIPPED_FRESH_DISCOVERY";
+type RunResult={label:string;status:RunStatus;exitCode:number|null;runtimeMs:number};
 function now(){return new Date().toISOString();}
 async function json(file:string,fallback:any){try{return JSON.parse(await fs.readFile(file,"utf8"));}catch{return fallback;}}
 async function atomic(file:string,data:any){await fs.mkdir(path.dirname(file),{recursive:true});const tmp=`${file}.${process.pid}.tmp`;await fs.writeFile(tmp,JSON.stringify(data,null,2));await fs.rename(tmp,file);}
@@ -30,7 +31,7 @@ async function run(label:string,script:string,timeoutMs:number,env:Record<string
   return await new Promise(resolve=>{
     let done=false,timedOut=false;
     const child=spawn(process.execPath,[script],{stdio:"inherit",env:{...process.env,...env}});
-    const finish=(status:RunResult["status"],exitCode:number|null)=>{if(done)return;done=true;clearTimeout(timer);const result={label,status,exitCode,runtimeMs:Date.now()-started};emit("shark_scout_mission_discovery_stage_finished",result);resolve(result);};
+    const finish=(status:RunStatus,exitCode:number|null)=>{if(done)return;done=true;clearTimeout(timer);const result={label,status,exitCode,runtimeMs:Date.now()-started};emit("shark_scout_mission_discovery_stage_finished",result);resolve(result);};
     const timer=setTimeout(()=>{timedOut=true;emit("shark_scout_mission_discovery_stage_timeout",{label,runtimeMs:Date.now()-started});try{child.kill("SIGTERM");}catch{}setTimeout(()=>{if(child.exitCode===null)try{child.kill("SIGKILL");}catch{}},4000).unref();},timeoutMs);
     child.once("error",()=>finish("FAILED",1));
     child.once("close",code=>finish(timedOut?"TIMED_OUT":code===0?"SUCCESS":"FAILED",code));
@@ -70,11 +71,24 @@ async function main(){
     outcomeMerge=outcome.status==="SUCCESS"?await mergeOutcomeTmp():{merged:false,reason:outcome.status};
   }
 
+  const outcomeUseful=outcome.status==="SUCCESS"||outcome.status==="SKIPPED_CORE_SUCCESS";
+  const freshOutcomeAdded=outcome.status==="SUCCESS"&&Boolean(outcomeMerge?.merged)&&(Number(outcomeMerge?.newWallets||0)>0||Number(outcomeMerge?.walletsAdmitted||0)>0);
+
   let harvest:RunResult;
   let harvestProgress:any={reportAdvanced:false,stateAdvanced:false};
   if(coreHarvest?.status==="SUCCESS"){
     harvest={label:"harvest_scout_hourly",status:"SKIPPED_CORE_SUCCESS",exitCode:0,runtimeMs:0};
     emit("shark_scout_mission_discovery_stage_skipped",{label:harvest.label,reason:"CORE_ALREADY_SUCCEEDED",coreDurationMs:coreHarvest.durationMs??null});
+  }else if(coreHarvest?.status==="SKIPPED_EVENT"&&freshOutcomeAdded){
+    harvest={label:"harvest_scout_hourly",status:"SKIPPED_FRESH_DISCOVERY",exitCode:0,runtimeMs:0};
+    emit("shark_scout_mission_discovery_stage_skipped",{
+      label:harvest.label,
+      reason:"FRESH_OUTCOME_DISCOVERY_ALREADY_ADVANCED_UNIVERSE",
+      coreHarvestStatus:coreHarvest.status,
+      newWallets:outcomeMerge?.newWallets??null,
+      walletsAdmitted:outcomeMerge?.walletsAdmitted??null,
+      note:"Full Harvest remains on its core cadence; hourly recovery is reserved for actual discovery failure/degradation rather than cadence skips."
+    });
   }else{
     const beforeReport=await json(HARVEST_REPORT,null),beforeState=await json(SCOUT_STATE,null);
     harvest=await run("harvest_scout_hourly","dist/harvest_scout_fabric.js",70_000,{
@@ -96,11 +110,10 @@ async function main(){
     emit("shark_scout_mission_discovery_harvest_progress",harvestProgress);
   }
 
-  const outcomeUseful=outcome.status==="SUCCESS"||outcome.status==="SKIPPED_CORE_SUCCESS";
-  const harvestUseful=harvest.status==="SUCCESS"||harvest.status==="SKIPPED_CORE_SUCCESS"||Boolean(harvestProgress.reportAdvanced)||Boolean(harvestProgress.stateAdvanced);
-  const report={schemaVersion:3,patch:"0.55.0-package3",startedAt,finishedAt:now(),core:{finishedAt:truth?.finishedAt||null,outcomeStatus:coreOutcome?.status||null,harvestStatus:coreHarvest?.status||null},outcome,outcomeMerge,harvest,harvestProgress,status:(outcomeUseful||harvestUseful)?"DISCOVERY_EXECUTED_OR_CONFIRMED":"DISCOVERY_DEGRADED"};
+  const harvestUseful=harvest.status==="SUCCESS"||harvest.status==="SKIPPED_CORE_SUCCESS"||harvest.status==="SKIPPED_FRESH_DISCOVERY"||Boolean(harvestProgress.reportAdvanced)||Boolean(harvestProgress.stateAdvanced);
+  const report={schemaVersion:4,patch:"0.55.1-package3-hotfix",startedAt,finishedAt:now(),core:{finishedAt:truth?.finishedAt||null,outcomeStatus:coreOutcome?.status||null,harvestStatus:coreHarvest?.status||null},outcome,outcomeMerge,harvest,harvestProgress,status:(outcomeUseful||harvestUseful)?"DISCOVERY_EXECUTED_OR_CONFIRMED":"DISCOVERY_DEGRADED"};
   await atomic(REPORT,report);
   emit("shark_scout_mission_discovery_complete",report);
 }
 
-main().catch(async e=>{const report={schemaVersion:3,patch:"0.55.0-package3",finishedAt:now(),status:"FAILED",error:e instanceof Error?e.message:String(e)};try{await atomic(REPORT,report);}catch{}console.error(JSON.stringify({event:"shark_scout_mission_discovery_failed",...report}));process.exitCode=1;});
+main().catch(async e=>{const report={schemaVersion:4,patch:"0.55.1-package3-hotfix",finishedAt:now(),status:"FAILED",error:e instanceof Error?e.message:String(e)};try{await atomic(REPORT,report);}catch{}console.error(JSON.stringify({event:"shark_scout_mission_discovery_failed",...report}));process.exitCode=1;});
