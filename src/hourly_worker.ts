@@ -1,6 +1,6 @@
 import { ChildProcess, spawn } from "node:child_process";
 
-const PATCH = "0.55.4-package34-gauntlet-call-guard";
+const PATCH = "0.55.5-package35-gauntlet-isolation";
 const RUNNER = "dist/cron_supervisor.js";
 const CORE_OVERRIDES = {
   GAUNTLET_PREFILTER_LIMIT: "20",
@@ -109,7 +109,8 @@ async function runOnce(trigger: "scheduled" | "startup_recovery") {
     package31:true,
     package32:true,
     package33:true,
-    package34:true
+    package34:true,
+    package35:true
   });
 }
 
