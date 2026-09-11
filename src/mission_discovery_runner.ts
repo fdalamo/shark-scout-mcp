@@ -6,6 +6,8 @@ const REAL_OUT=process.env.SCOUT_OUTCOME_MINER_PATH||"/data/outcome-miner-v2.jso
 const TMP_OUT="/data/outcome-miner-hourly-tmp.json";
 const REPORT="/data/mission-discovery-run.json";
 const PIPELINE_TRUTH=process.env.SCOUT_PIPELINE_TRUTH_PATH||"/data/pipeline-truth.json";
+const HARVEST_REPORT=process.env.SCOUT_REPORT_PATH||"/data/latest-harvest.json";
+const SCOUT_STATE=process.env.SCOUT_STATE_PATH||"/data/shark-state.json";
 const CORE_FRESH_MS=15*60_000;
 
 type RunResult={label:string;status:"SUCCESS"|"FAILED"|"TIMED_OUT"|"SKIPPED_CORE_SUCCESS";exitCode:number|null;runtimeMs:number};
@@ -44,6 +46,8 @@ async function mergeOutcomeTmp(){
   return {merged:true,finishedAt:fresh.finishedAt||null,newWallets:fresh.newWallets??null,walletsAdmitted:fresh.walletsAdmitted??null,poolsSucceeded:fresh.poolsSucceeded??null};
 }
 
+function stamp(x:any){return String(x?.telemetry?.finishedAt||x?.finishedAt||x?.updatedAt||"")||null;}
+
 async function main(){
   const startedAt=now(),truth=await json(PIPELINE_TRUTH,{});
   const coreOutcome=freshCoreResult(truth,"outcome_miner_v2"),coreHarvest=freshCoreResult(truth,"harvest_scout");
@@ -54,8 +58,6 @@ async function main(){
     outcomeMerge={merged:false,reason:"CORE_ALREADY_SUCCEEDED"};
     emit("shark_scout_mission_discovery_stage_skipped",{label:outcome.label,reason:"CORE_ALREADY_SUCCEEDED",coreDurationMs:coreOutcome.durationMs??null});
   }else{
-    // Isolate the hourly report so the miner's legacy multi-hour poll gate cannot suppress a recovery pass.
-    // Keep the retry lane bounded; state remains authoritative at SCOUT_STATE_PATH.
     await atomic(TMP_OUT,{runs:[]});
     outcome=await run("outcome_miner_hourly","dist/outcome_miner_v2.js",105_000,{
       SCOUT_OUTCOME_MINER_PATH:TMP_OUT,
@@ -69,18 +71,36 @@ async function main(){
   }
 
   let harvest:RunResult;
+  let harvestProgress:any={reportAdvanced:false,stateAdvanced:false};
   if(coreHarvest?.status==="SUCCESS"){
     harvest={label:"harvest_scout_hourly",status:"SKIPPED_CORE_SUCCESS",exitCode:0,runtimeMs:0};
     emit("shark_scout_mission_discovery_stage_skipped",{label:harvest.label,reason:"CORE_ALREADY_SUCCEEDED",coreDurationMs:coreHarvest.durationMs??null});
   }else{
-    harvest=await run("harvest_scout_hourly","dist/harvest_scout_fabric.js",90_000,{});
+    const beforeReport=await json(HARVEST_REPORT,null),beforeState=await json(SCOUT_STATE,null);
+    harvest=await run("harvest_scout_hourly","dist/harvest_scout_fabric.js",70_000,{
+      HARVEST_PROFILE_LIMIT:"8",
+      HARVEST_TOKEN_LIMIT:"12",
+      CIELO_TAG_ENRICH_PER_RUN:"8",
+      CIELO_BRIDGE_TOKEN_LIMIT:"2",
+      CIELO_BRIDGE_TRADERS_PER_TOKEN:"3",
+      REQUEST_TIMEOUT_MS:"8000"
+    });
+    const afterReport=await json(HARVEST_REPORT,null),afterState=await json(SCOUT_STATE,null);
+    harvestProgress={
+      reportAdvanced:Boolean(stamp(afterReport)&&stamp(afterReport)!==stamp(beforeReport)),
+      reportBefore:stamp(beforeReport),reportAfter:stamp(afterReport),
+      stateAdvanced:Boolean(stamp(afterState)&&stamp(afterState)!==stamp(beforeState)),
+      stateBefore:stamp(beforeState),stateAfter:stamp(afterState),
+      note:"A timed-out recovery is not treated as zero work when persistent report/state advanced."
+    };
+    emit("shark_scout_mission_discovery_harvest_progress",harvestProgress);
   }
 
   const outcomeUseful=outcome.status==="SUCCESS"||outcome.status==="SKIPPED_CORE_SUCCESS";
-  const harvestUseful=harvest.status==="SUCCESS"||harvest.status==="SKIPPED_CORE_SUCCESS";
-  const report={schemaVersion:2,patch:"0.54.1-discovery-dedupe",startedAt,finishedAt:now(),core:{finishedAt:truth?.finishedAt||null,outcomeStatus:coreOutcome?.status||null,harvestStatus:coreHarvest?.status||null},outcome,outcomeMerge,harvest,status:(outcomeUseful||harvestUseful)?"DISCOVERY_EXECUTED_OR_CONFIRMED":"DISCOVERY_DEGRADED"};
+  const harvestUseful=harvest.status==="SUCCESS"||harvest.status==="SKIPPED_CORE_SUCCESS"||Boolean(harvestProgress.reportAdvanced)||Boolean(harvestProgress.stateAdvanced);
+  const report={schemaVersion:3,patch:"0.55.0-package3",startedAt,finishedAt:now(),core:{finishedAt:truth?.finishedAt||null,outcomeStatus:coreOutcome?.status||null,harvestStatus:coreHarvest?.status||null},outcome,outcomeMerge,harvest,harvestProgress,status:(outcomeUseful||harvestUseful)?"DISCOVERY_EXECUTED_OR_CONFIRMED":"DISCOVERY_DEGRADED"};
   await atomic(REPORT,report);
   emit("shark_scout_mission_discovery_complete",report);
 }
 
-main().catch(async e=>{const report={schemaVersion:2,patch:"0.54.1-discovery-dedupe",finishedAt:now(),status:"FAILED",error:e instanceof Error?e.message:String(e)};try{await atomic(REPORT,report);}catch{}console.error(JSON.stringify({event:"shark_scout_mission_discovery_failed",...report}));process.exitCode=1;});
+main().catch(async e=>{const report={schemaVersion:3,patch:"0.55.0-package3",finishedAt:now(),status:"FAILED",error:e instanceof Error?e.message:String(e)};try{await atomic(REPORT,report);}catch{}console.error(JSON.stringify({event:"shark_scout_mission_discovery_failed",...report}));process.exitCode=1;});
