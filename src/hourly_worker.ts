@@ -1,10 +1,14 @@
 import { ChildProcess, spawn } from "node:child_process";
 
-const PATCH = "0.55.0-package3";
+const PATCH = "0.55.1-package3-hotfix";
 const RUNNER = "dist/cron_supervisor.js";
 const CORE_OVERRIDES = {
-  GAUNTLET_PREFILTER_LIMIT: "30",
-  GAUNTLET_FULL_LIMIT: "10"
+  GAUNTLET_PREFILTER_LIMIT: "20",
+  GAUNTLET_FULL_LIMIT: "10",
+  GAUNTLET_HELIUS_PAGES: "1",
+  GAUNTLET_CONCURRENCY: "4",
+  GAUNTLET_HELIUS_MIN_INTERVAL_MS: "150",
+  REQUEST_TIMEOUT_MS: "5000"
 };
 const POST_PROCESSORS = [
   ["mission_discovery", "dist/mission_discovery_runner.js"],
@@ -95,7 +99,8 @@ async function runOnce(trigger: "scheduled" | "startup_recovery") {
     postResults,
     missionReset:true,
     package2:true,
-    package3:true
+    package3:true,
+    package31:true
   });
 }
 
