@@ -32,7 +32,13 @@ async function main(){
   ]);
   const runs=Array.isArray(canonical?.runs)?canonical.runs:[],lastCanonical=runs[runs.length-1]||{},totals=canonical?.totals||{};
   const providerCalls=n(lastCanonical.providerCalls),cacheHits=n(lastCanonical.cacheHits),rowsServed=n(lastCanonical.rowsServed),swapRows=n(lastCanonical.swapRowsServed),intercepted=n(lastCanonical.intercepted),fallbacks=n(lastCanonical.fallbacks),partials=n(lastCanonical.partialResponses),budgetStops=n(lastCanonical.budgetStops);
-  const txEntries=Object.keys(txCache?.transactions||{}).length,ambiguityEntries=Object.values(ambiguity?.entries||{}) as AnyObj[],liveMirrors=(Array.isArray(odin?.mirrors)?odin.mirrors:[]).map((x:any)=>String(x?.address||"")).filter(Boolean),liveSet=new Set(liveMirrors);
+  const txEntries=Object.keys(txCache?.transactions||{}).length,ambiguityEntries=Object.values(ambiguity?.entries||{}) as AnyObj[];
+  const trackedMirrors:AnyObj[]=(Array.isArray(odin?.mirrors)?odin.mirrors:[])
+    .map((x:any)=>({address:String(x?.address||x?.wallet||x?.sourceWallet||""),allowBuys:x?.allowBuys}))
+    .filter((x:AnyObj)=>Boolean(x.address));
+  const liveMirrors=trackedMirrors.filter((x:AnyObj)=>x.allowBuys!==false).map((x:AnyObj)=>x.address);
+  const buysDisabledMirrors=trackedMirrors.filter((x:AnyObj)=>x.allowBuys===false).map((x:AnyObj)=>x.address);
+  const liveSet=new Set(liveMirrors);
   const results=Object.entries(cp?.results||{}).map(([address,r0])=>({address,r:r0 as AnyObj,status:statusOf(r0)}));
   const priority={
     P0_LIVE_MIRRORS:results.filter(x=>liveSet.has(x.address)).length,
@@ -51,15 +57,15 @@ async function main(){
   if(ambiguityEntries.length>1000)degradedReasons.push("ambiguity_backlog_over_1000");
   const health=degradedReasons.length?"DEGRADED":"HEALTHY";
   const out={
-    schemaVersion:1,event:"shark_scout_research_core_health",status:health,startedAt,finishedAt:now(),degradedReasons,
+    schemaVersion:2,event:"shark_scout_research_core_health",status:health,startedAt,finishedAt:now(),degradedReasons,
     canonical:{lastRun:{scope:lastCanonical?.scope||null,startedAt:lastCanonical?.startedAt||null,finishedAt:lastCanonical?.finishedAt||null,intercepted,providerCalls,cacheHits,rowsServed,swapRowsServed:swapRows,partialResponses:partials,budgetStops,fallbacks,ambiguitiesQueued:n(lastCanonical?.ambiguitiesQueued)},totals},
     efficiency:{enhancedHistoryCallsAvoided:Math.max(0,intercepted-fallbacks),rowsPer1000ProviderCalls:providerCalls?rowsServed/providerCalls*1000:null,swapsPer1000ProviderCalls:providerCalls?swapRows/providerCalls*1000:null,cacheHitsPer1000ProviderCalls:providerCalls?cacheHits/providerCalls*1000:null},
     transactionLake:{entries:txEntries,bytes:cacheBytes,maxConfigured:Number(canonical?.runs?.[canonical.runs.length-1]?.transactionFabric?.maxCache||0)||null},
     ambiguity:{backlog:ambiguityEntries.length,oldestSeenAt:ambiguityEntries.map(x=>Date.parse(String(x?.firstSeenAt||""))).filter(Number.isFinite).sort((a,b)=>a-b)[0]?new Date(ambiguityEntries.map(x=>Date.parse(String(x?.firstSeenAt||""))).filter(Number.isFinite).sort((a,b)=>a-b)[0]!).toISOString():null},
-    gauntlet:{processedCumulative:n(gauntlet?.processedCumulative),remaining:n(gauntlet?.remaining),counts:gauntlet?.counts||{},deepDiveReported:Array.isArray(gauntlet?.deepDive)?gauntlet.deepDive.length:0,actionableCanonical:actionable,priorityBacklog:priority,liveMirrorsTracked:liveMirrors.length},
+    gauntlet:{processedCumulative:n(gauntlet?.processedCumulative),remaining:n(gauntlet?.remaining),counts:gauntlet?.counts||{},deepDiveReported:Array.isArray(gauntlet?.deepDive)?gauntlet.deepDive.length:0,actionableCanonical:actionable,priorityBacklog:priority,trackedMirrors:trackedMirrors.length,liveMirrorsTracked:liveMirrors.length,buysDisabledMirrorsTracked:buysDisabledMirrors.length},
     transferTruth:{stateCounts,capBlockedMisses:n(stateCounts?.COPY_BLOCKED_BY_ODIN_POLICY),unexplainedExpectedMisses:n(stateCounts?.EXPECTED_COPY_NOT_MATCHED),actualOdinSamples:actualSamples},
     resourcePolicy:{principle:"immutable transaction history is cached; hourly work should converge toward delta-only refresh",heliusEnhancedRole:"ambiguity/adjudication fallback only",liveExecutionMutation:false,paidProviderUpgrade:false},
-    notes:["P0/P1/P2/P3/P4 are scheduling priorities, not promotion decisions.","A high ambiguity backlog is a parsing-quality issue; it does not justify bulk Helius Enhanced history calls.","Provider-efficiency ratios are descriptive for the latest canonical fabric run and are not normalized for provider-specific unit pricing.","No Odin settings, capital, speed tier, or provider plan is changed by this stage."]
+    notes:["P0/P1/P2/P3/P4 are scheduling priorities, not promotion decisions.","P0 live-mirror scheduling includes only currently buy-enabled Odin mirrors; buys-disabled tracked mirrors remain visible separately and do not consume live priority.","A high ambiguity backlog is a parsing-quality issue; it does not justify bulk Helius Enhanced history calls.","Provider-efficiency ratios are descriptive for the latest canonical fabric run and are not normalized for provider-specific unit pricing.","No Odin settings, capital, speed tier, or provider plan is changed by this stage."]
   };
   await atomic(OUT_PATH,out);console.log(JSON.stringify(out));
 }
