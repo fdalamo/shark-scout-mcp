@@ -12,7 +12,7 @@ type CadenceState={schemaVersion:1;updatedAt?:string;lastSuccessAt:Record<string
 
 const MINUTE=60_000;
 const HOUR=60*MINUTE;
-const PIPELINE_VERSION=17;
+const PIPELINE_VERSION=18;
 const ODIN_RESEARCH_CORE="v0.51.0";
 const PIPELINE_BUDGET_MS=Math.max(16*MINUTE,Math.min(20*MINUTE,Number(process.env.HARVEST_PIPELINE_BUDGET_MS||20*MINUTE)));
 const FINALIZE_RESERVE_MS=Math.max(7*MINUTE,Math.min(9*MINUTE,Number(process.env.HARVEST_FINALIZE_RESERVE_MS||8*MINUTE)));
@@ -42,7 +42,7 @@ const stages:Stage[]=[
 {name:"harvest_scout",phase:"DISCOVERY",workClass:"COLD",args:["dist/harvest_scout_fabric.js"],timeoutMs:3*MINUTE,continueOnFailure:true,cadenceHours:DISCOVERY_CADENCE_HOURS,priority:15},
 {name:"canonical_snapshot_pre",phase:"CANONICAL",workClass:"SYSTEM",args:["dist/canonical_state_guard.js","snapshot"],timeoutMs:2*MINUTE,priority:80},
 {name:"deep_dive",phase:"CANONICAL",workClass:"COLD",args:["dist/deep_dive_fabric.js"],timeoutMs:2*MINUTE,continueOnFailure:true,priority:70},
-{name:"gauntlet_v6",phase:"CANONICAL",workClass:"COLD",args:["dist/gauntlet_v6_fabric.js"],timeoutMs:2*MINUTE,continueOnFailure:true,env:{VYBE_API_KEY:""},priority:65},
+{name:"gauntlet_v6",phase:"CANONICAL",workClass:"COLD",args:["dist/gauntlet_v6_fabric.js"],timeoutMs:150_000,continueOnFailure:true,env:{VYBE_API_KEY:""},priority:65},
 {name:"canonical_restore",phase:"CANONICAL",workClass:"SYSTEM",args:["dist/canonical_state_guard.js","restore"],timeoutMs:2*MINUTE,priority:100},
 {name:"replay_shadow",phase:"CANONICAL",workClass:"COLD",args:["dist/replay_shadow.js"],timeoutMs:150_000,continueOnFailure:true,priority:75},
 {name:"canonical_snapshot_post",phase:"CANONICAL",workClass:"SYSTEM",args:["dist/canonical_state_guard.js","snapshot"],timeoutMs:2*MINUTE,priority:80},
