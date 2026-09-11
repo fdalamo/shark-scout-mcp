@@ -1,6 +1,6 @@
 import { ChildProcess, spawn } from "node:child_process";
 
-const PATCH = "0.55.2-package32-gauntlet-envelope";
+const PATCH = "0.55.3-package33-bounded-core";
 const RUNNER = "dist/cron_supervisor.js";
 const CORE_OVERRIDES = {
   GAUNTLET_PREFILTER_LIMIT: "20",
@@ -8,6 +8,12 @@ const CORE_OVERRIDES = {
   GAUNTLET_HELIUS_PAGES: "1",
   GAUNTLET_CONCURRENCY: "4",
   GAUNTLET_HELIUS_MIN_INTERVAL_MS: "150",
+  GAUNTLET_TIME_BUDGET_SECONDS: "120",
+  HARVEST_PROFILE_LIMIT: "8",
+  HARVEST_TOKEN_LIMIT: "12",
+  CIELO_TAG_ENRICH_PER_RUN: "8",
+  CIELO_BRIDGE_TOKEN_LIMIT: "2",
+  CIELO_BRIDGE_TRADERS_PER_TOKEN: "3",
   REQUEST_TIMEOUT_MS: "5000"
 };
 const POST_PROCESSORS = [
@@ -101,7 +107,8 @@ async function runOnce(trigger: "scheduled" | "startup_recovery") {
     package2:true,
     package3:true,
     package31:true,
-    package32:true
+    package32:true,
+    package33:true
   });
 }
 
