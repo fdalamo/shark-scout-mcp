@@ -11,9 +11,10 @@ const TARGETS=(process.env.HOT_EVENT_WALLETS||[
   "6mzEFZ458A6qcaQLgtBuYYaGJ1qN5tz2Wsr6PC1fLFzx",
   "5mcTKhm5iyb8Zz3jpxuNr7BT78i6AKy5RqoMGkFNj8ZZ"
 ].join(",")).split(",").map(x=>x.trim()).filter(Boolean);
+const HOT_SIGNATURE_PROVIDER_ORDER=["solana_tracker","alchemy","chainstack","helius"] as const;
 async function load():Promise<State>{try{const x=JSON.parse(await fs.readFile(STATE_PATH,"utf8"));return{schemaVersion:1,updatedAt:x.updatedAt||new Date(0).toISOString(),lastForcedAt:x.lastForcedAt||new Date(0).toISOString(),signatures:x.signatures||{}};}catch{return{schemaVersion:1,updatedAt:new Date(0).toISOString(),lastForcedAt:new Date(0).toISOString(),signatures:{}};}}
 async function atomic(file:string,value:unknown){await fs.mkdir(path.dirname(file),{recursive:true});const tmp=`${file}.${process.pid}.tmp`;await fs.writeFile(tmp,JSON.stringify(value));await fs.rename(tmp,file);}
-async function latestSignature(wallet:string){const x=await routedRpc("getSignaturesForAddress",[wallet,{limit:1}]);const rows=Array.isArray(x.result)?x.result as Array<{signature?:string}>:[];return rows[0]?.signature||null;}
+async function latestSignature(wallet:string){const x=await routedRpc("getSignaturesForAddress",[wallet,{limit:1}],{preferred:[...HOT_SIGNATURE_PROVIDER_ORDER]});const rows=Array.isArray(x.result)?x.result as Array<{signature?:string}>:[];return rows[0]?.signature||null;}
 async function main(){
   const startedAt=new Date().toISOString(),previous=await load(),current:Record<string,string|null>={},errors:string[]=[];
   let changed=false,observedSignatures=0,baselineSignatures=0,unavailableSignatures=0;
@@ -41,8 +42,8 @@ async function main(){
   const refresh=changed||forced||errors.length>0;
   const next:State={schemaVersion:1,updatedAt:new Date().toISOString(),lastForcedAt:forced?new Date().toISOString():previous.lastForcedAt,signatures:{...previous.signatures,...current}};
   await atomic(STATE_PATH,next);
-  const decision={schemaVersion:1,event:"shark_scout_hot_event_gate",startedAt,finishedAt:new Date().toISOString(),targets:TARGETS.length,fabricEnabled,changed,forced,refresh,observedSignatures,baselineSignatures,unavailableSignatures,errors,currentSignatures:current};
+  const decision={schemaVersion:2,event:"shark_scout_hot_event_gate",startedAt,finishedAt:new Date().toISOString(),targets:TARGETS.length,fabricEnabled,providerOrder:HOT_SIGNATURE_PROVIDER_ORDER,changed,forced,refresh,observedSignatures,baselineSignatures,unavailableSignatures,errors,currentSignatures:current};
   await atomic(DECISION_PATH,decision);
   console.log(JSON.stringify({level:"info",...decision}));
 }
-main().catch(async e=>{const decision={schemaVersion:1,event:"shark_scout_hot_event_gate",finishedAt:new Date().toISOString(),targets:TARGETS.length,changed:false,forced:false,refresh:true,observedSignatures:0,baselineSignatures:0,unavailableSignatures:TARGETS.length,errors:[String(e)]};try{await atomic(DECISION_PATH,decision);}catch{}console.log(JSON.stringify({level:"warn",...decision}));process.exitCode=0;});
+main().catch(async e=>{const decision={schemaVersion:2,event:"shark_scout_hot_event_gate",finishedAt:new Date().toISOString(),targets:TARGETS.length,providerOrder:HOT_SIGNATURE_PROVIDER_ORDER,changed:false,forced:false,refresh:true,observedSignatures:0,baselineSignatures:0,unavailableSignatures:TARGETS.length,errors:[String(e)]};try{await atomic(DECISION_PATH,decision);}catch{}console.log(JSON.stringify({level:"warn",...decision}));process.exitCode=0;});
