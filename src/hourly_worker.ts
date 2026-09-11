@@ -1,7 +1,11 @@
 import { ChildProcess, spawn } from "node:child_process";
+import { readFileSync, renameSync, writeFileSync } from "node:fs";
 
-const PATCH = "0.55.5-package35-gauntlet-isolation";
+const PATCH = "0.55.6-package36-hourly-watchdog";
 const RUNNER = "dist/cron_supervisor.js";
+const WORKER_STATE_PATH = process.env.SCOUT_HOURLY_WORKER_STATE_PATH || "/data/hourly_worker_state.json";
+const WATCHDOG_INTERVAL_MS = 5 * 60 * 1000;
+const WATCHDOG_GRACE_MINUTES = 5;
 const CORE_OVERRIDES = {
   GAUNTLET_PREFILTER_LIMIT: "20",
   GAUNTLET_FULL_LIMIT: "10",
@@ -23,10 +27,18 @@ const POST_PROCESSORS = [
   ["mission_report", "dist/mission_report.js"]
 ] as const;
 
+type RunTrigger = "scheduled" | "startup_recovery" | "missed_slot_recovery";
+type WorkerState = {
+  lastStartedSlot: string | null;
+  lastFinishedSlot: string | null;
+  lastRunStartedAt: string | null;
+  lastRunFinishedAt: string | null;
+};
+
 let current: ChildProcess | null = null;
 let shuttingDown = false;
-let lastSlot: string | null = null;
 let nextTimer: NodeJS.Timeout | null = null;
+let watchdogTimer: NodeJS.Timeout | null = null;
 
 function emit(event: string, extra: Record<string, unknown> = {}) {
   console.log(JSON.stringify({
@@ -40,6 +52,41 @@ function emit(event: string, extra: Record<string, unknown> = {}) {
 
 function slotKey(date = new Date()) {
   return date.toISOString().slice(0, 13);
+}
+
+function loadWorkerState(): WorkerState {
+  try {
+    const parsed = JSON.parse(readFileSync(WORKER_STATE_PATH, "utf8")) as Partial<WorkerState>;
+    return {
+      lastStartedSlot: parsed.lastStartedSlot ?? null,
+      lastFinishedSlot: parsed.lastFinishedSlot ?? null,
+      lastRunStartedAt: parsed.lastRunStartedAt ?? null,
+      lastRunFinishedAt: parsed.lastRunFinishedAt ?? null
+    };
+  } catch {
+    return {
+      lastStartedSlot: null,
+      lastFinishedSlot: null,
+      lastRunStartedAt: null,
+      lastRunFinishedAt: null
+    };
+  }
+}
+
+let workerState = loadWorkerState();
+let lastSlot: string | null = workerState.lastStartedSlot;
+
+function persistWorkerState() {
+  try {
+    const tmpPath = `${WORKER_STATE_PATH}.tmp`;
+    writeFileSync(tmpPath, JSON.stringify(workerState, null, 2));
+    renameSync(tmpPath, WORKER_STATE_PATH);
+  } catch (error) {
+    emit("shark_scout_hourly_worker_state_persist_failed", {
+      statePath: WORKER_STATE_PATH,
+      error: error instanceof Error ? error.message : String(error)
+    });
+  }
 }
 
 function nextHourDelayMs(now = new Date()) {
@@ -70,7 +117,7 @@ async function runChild(label:string,script:string){
   });
 }
 
-async function runOnce(trigger: "scheduled" | "startup_recovery") {
+async function runOnce(trigger: RunTrigger) {
   if (shuttingDown) return;
   if (current) {
     emit("shark_scout_hourly_worker_overlap_skipped", {
@@ -87,6 +134,12 @@ async function runOnce(trigger: "scheduled" | "startup_recovery") {
     return;
   }
   lastSlot = slot;
+  workerState = {
+    ...workerState,
+    lastStartedSlot: slot,
+    lastRunStartedAt: new Date().toISOString()
+  };
+  persistWorkerState();
 
   emit("shark_scout_hourly_worker_run_started", { trigger, slot, runner: RUNNER,postProcessors:POST_PROCESSORS.map(x=>x[0]),coreOverrides:CORE_OVERRIDES });
   const startedAt = Date.now();
@@ -98,6 +151,12 @@ async function runOnce(trigger: "scheduled" | "startup_recovery") {
       catch(e){emit("shark_scout_hourly_worker_postprocessor_exception",{label,error:e instanceof Error?e.message:String(e)});}
     }
   }
+  workerState = {
+    ...workerState,
+    lastFinishedSlot: slot,
+    lastRunFinishedAt: new Date().toISOString()
+  };
+  persistWorkerState();
   emit("shark_scout_hourly_worker_run_finished", {
     slot,
     runtimeMs: Date.now()-startedAt,
@@ -110,8 +169,45 @@ async function runOnce(trigger: "scheduled" | "startup_recovery") {
     package32:true,
     package33:true,
     package34:true,
-    package35:true
+    package35:true,
+    package36:true
   });
+}
+
+async function watchdogCheck(reason: "startup" | "interval") {
+  if (shuttingDown) return;
+  const now = new Date();
+  const slot = slotKey(now);
+  const minute = now.getUTCMinutes();
+  const slotSeen = lastSlot === slot || workerState.lastStartedSlot === slot;
+
+  emit("shark_scout_hourly_worker_watchdog_check", {
+    reason,
+    slot,
+    minute,
+    slotSeen,
+    activePid: current?.pid ?? null,
+    lastStartedSlot: workerState.lastStartedSlot,
+    lastFinishedSlot: workerState.lastFinishedSlot
+  });
+
+  if (minute < WATCHDOG_GRACE_MINUTES || slotSeen) return;
+  if (current) {
+    emit("shark_scout_hourly_worker_watchdog_deferred", {
+      reason,
+      slot,
+      activePid: current.pid ?? null
+    });
+    return;
+  }
+
+  emit("shark_scout_hourly_worker_missed_slot_detected", {
+    reason,
+    slot,
+    minute,
+    recovery: "missed_slot_recovery"
+  });
+  await runOnce(reason === "startup" ? "startup_recovery" : "missed_slot_recovery");
 }
 
 function scheduleNext() {
@@ -129,10 +225,19 @@ function scheduleNext() {
   }, delayMs);
 }
 
+function startWatchdog() {
+  if (watchdogTimer) clearInterval(watchdogTimer);
+  void watchdogCheck("startup");
+  watchdogTimer = setInterval(() => {
+    void watchdogCheck("interval");
+  }, WATCHDOG_INTERVAL_MS);
+}
+
 async function shutdown(signal: NodeJS.Signals) {
   if (shuttingDown) return;
   shuttingDown = true;
   if (nextTimer) clearTimeout(nextTimer);
+  if (watchdogTimer) clearInterval(watchdogTimer);
   emit("shark_scout_hourly_worker_shutdown", {
     signal,
     activePid: current?.pid ?? null
@@ -165,7 +270,12 @@ emit("shark_scout_hourly_worker_started", {
   noOverlap: true,
   runner: RUNNER,
   postProcessors:POST_PROCESSORS.map(x=>x[0]),
-  coreOverrides:CORE_OVERRIDES
+  coreOverrides:CORE_OVERRIDES,
+  workerStatePath:WORKER_STATE_PATH,
+  watchdogIntervalMs:WATCHDOG_INTERVAL_MS,
+  watchdogGraceMinutes:WATCHDOG_GRACE_MINUTES,
+  recoveredState:workerState
 });
 
 scheduleNext();
+startWatchdog();
