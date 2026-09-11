@@ -1,6 +1,6 @@
 import { ChildProcess, spawn } from "node:child_process";
 
-const PATCH = "0.54.0-discovery-throughput";
+const PATCH = "0.54.1-discovery-dedupe";
 const RUNNER = "dist/cron_supervisor.js";
 const POST_PROCESSORS = [
   ["mission_discovery", "dist/mission_discovery_runner.js"],
