@@ -56,7 +56,7 @@ function reportAnalysis(follower:any,live:any,quota:any,newEntries:any[],changed
   if(misses>0)notes.push(`${misses} eligible-not-copied opportunity/opportunities remain distinct from policy blocks and require execution/transfer diagnosis.`);
   if(newEntries.length)notes.push(`${newEntries.length} new source opportunity/opportunities entered the durable policy ledger this hour.`);
   if(changedMirrors.length===0)notes.push("No live-mirror evidence counters changed since the prior hourly snapshot.");
-  const decisions=(live?.byMirror||live?.mirrors||[]).map((x:any)=>({mirror:x.mirror||x.address,verdict:x.verdict||x.recommendation||x.status})).filter((x:any)=>x.mirror);
+  const decisions=(live?.byMirror||live?.mirrors||live?.scorecards||[]).map((x:any)=>({mirror:x.mirror||x.address,verdict:x.verdict||x.recommendation||x.status})).filter((x:any)=>x.mirror);
   return {notes,decisions};
 }
 
@@ -69,11 +69,20 @@ export async function buildHourlyIntelligenceReport(){
   const priorEntryKeys=new Set<string>(Array.isArray(priorState?.entryKeys)?priorState.entryKeys:[]);
   const newEntries=entries.filter(e=>!priorEntryKeys.has(String(e.key||`${e.mirror}|${e.sourceSignature}`))).map(compactEntry);
   const currentByMirror=Array.isArray(follower?.byMirror)?follower.byMirror:[];
-  const changedMirrors=topChangedMirrors(currentByMirror,Array.isArray(priorState?.byMirror)?priorState.byMirror:[]);
+  const liveAddresses=(Array.isArray(live?.liveMirrors)?live.liveMirrors:(live?.scorecards||[]).map((x:any)=>x?.address||x?.mirror)).map((x:any)=>String(x||"")).filter(Boolean);
+  const disabledAddresses=(Array.isArray(live?.buysDisabledMirrors)?live.buysDisabledMirrors:[]).map((x:any)=>String(x||"")).filter(Boolean);
+  const liveSet=new Set<string>(liveAddresses);
+  const disabledSet=new Set<string>(disabledAddresses);
+  const liveByMirror=currentByMirror.filter((r:any)=>liveSet.has(String(r?.mirror||"")));
+  const disabledByMirror=currentByMirror.filter((r:any)=>disabledSet.has(String(r?.mirror||"")));
+  const allChangedMirrors=topChangedMirrors(currentByMirror,Array.isArray(priorState?.byMirror)?priorState.byMirror:[]);
+  const changedMirrors=allChangedMirrors.filter((r:any)=>liveSet.has(String(r?.mirror||"")));
   const current={
     followerSummary:follower?.summary||{},
-    liveMirrors:currentByMirror,
-    liveEdge:live?.byMirror||live?.mirrors||[],
+    trackedMirrors:currentByMirror,
+    liveMirrors:liveByMirror,
+    buysDisabledMirrors:disabledByMirror,
+    liveEdge:live?.byMirror||live?.mirrors||live?.scorecards||[],
     opportunityDebt:debt?.summary||debt,
     truthSummary:truth?.summary||{},
     quotaHealth:quota?.semanticHealth||"UNKNOWN",
@@ -82,6 +91,7 @@ export async function buildHourlyIntelligenceReport(){
   const changes={
     newSourceOpportunities:newEntries,
     changedMirrors,
+    changedTrackedMirrors:allChangedMirrors,
     totals:{
       entries:delta(follower?.entryCount,priorState?.entryCount),
       copied:delta(follower?.summary?.copied,priorState?.summary?.copied),
@@ -95,8 +105,8 @@ export async function buildHourlyIntelligenceReport(){
   };
   const analysis=reportAnalysis(follower,live,quota,newEntries,changedMirrors);
   const report={
-    schemaVersion:1,event:"shark_scout_hourly_intelligence_report_complete",generatedAt,
-    purpose:"Hourly change/progress/analysis surface for live mirrors, source opportunities, Odin decisions, follower outcomes, policy value, provider health, and research debt.",
+    schemaVersion:2,event:"shark_scout_hourly_intelligence_report_complete",generatedAt,
+    purpose:"Hourly change/progress/analysis surface for buy-enabled live mirrors, tracked mirrors, source opportunities, Odin decisions, follower outcomes, policy value, provider health, and research debt.",
     current,changes,analysis,
     guardrails:{observationalOnly:true,mutatesOdin:false,changesCapital:false,changesCaps:false,changesFilters:false,changesSpeed:false}
   };
