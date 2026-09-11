@@ -8,16 +8,23 @@ const ODIN_PATH=process.env.SCOUT_ODIN_SNAPSHOT_PATH||"/data/odin-config.json";
 const TRUTH_PATH=process.env.SCOUT_ODIN_TRUTH_LEDGER_PATH||"/data/odin-truth-ledger.json";
 const PAPER_REPORT_PATH=process.env.SCOUT_PAPER_ODIN_REPORT_PATH||"/data/paper-odin-report.json";
 const OUT_PATH=process.env.SCOUT_LIVE_EDGE_PATH||"/data/live-edge-controller.json";
+const MAX_PAPER_RETURN_MULTIPLE=Math.max(1000,Number(process.env.SCOUT_LIVE_EDGE_MAX_PAPER_RETURN_MULTIPLE||10000));
 
 async function read(file:string,fallback:any){try{return JSON.parse(await fs.readFile(file,"utf8"));}catch{return fallback;}}
 async function atomic(file:string,data:any){await fs.mkdir(path.dirname(file),{recursive:true});const tmp=`${file}.${process.pid}.tmp`;await fs.writeFile(tmp,JSON.stringify(data,null,2));await fs.rename(tmp,file);}
 function mean(xs:number[]){return xs.length?xs.reduce((a,b)=>a+b,0)/xs.length:null;}
 function sum(xs:number[]){return xs.reduce((a,b)=>a+b,0);}
 function n(v:any){const x=Number(v);return Number.isFinite(x)?x:0;}
-function verdict(input:{closed:number;realized:number;paperBuys:number;matched:number;eligibleMisses:number;eligibleMissNet:number}){
-  if(input.closed>=3&&input.realized<0)return{capitalPermission:"PAUSE",verdict:"PAUSE",reason:"NEGATIVE_REALIZED_WITH_SAMPLE"};
-  if(input.closed>=2&&input.realized>0)return{capitalPermission:"PRODUCTION",verdict:"KEEP",reason:"POSITIVE_PROSPECTIVE_REALIZED"};
-  if(input.paperBuys>0||input.matched>0)return{capitalPermission:"PROBATION",verdict:"RESTRICT",reason:"SOME_PROSPECTIVE_EVIDENCE_INSUFFICIENT_SAMPLE"};
+function paperPnlGuard(rawRealized:number,paperBuys:number,tradeSizeSol:number){
+  const deployed=Math.max(0,paperBuys)*Math.max(0,tradeSizeSol);
+  const limit=Math.max(10,deployed*MAX_PAPER_RETURN_MULTIPLE);
+  const quarantined=!Number.isFinite(rawRealized)||Math.abs(rawRealized)>limit;
+  return{rawRealizedNetSol:Number.isFinite(rawRealized)?rawRealized:null,realizedNetSol:quarantined?null:rawRealized,quarantined,limitSol:limit,returnMultipleLimit:MAX_PAPER_RETURN_MULTIPLE,reason:quarantined?"PAPER_PNL_EXTREME_UNVERIFIED":null};
+}
+function verdict(input:{closed:number;realized:number|null;paperBuys:number;matched:number;eligibleMisses:number;eligibleMissNet:number}){
+  if(input.realized!==null&&input.closed>=3&&input.realized<0)return{capitalPermission:"PAUSE",verdict:"PAUSE",reason:"NEGATIVE_REALIZED_WITH_SAMPLE"};
+  if(input.realized!==null&&input.closed>=2&&input.realized>0)return{capitalPermission:"PRODUCTION",verdict:"KEEP",reason:"POSITIVE_PROSPECTIVE_REALIZED"};
+  if(input.paperBuys>0||input.matched>0)return{capitalPermission:"PROBATION",verdict:"RESTRICT",reason:input.realized===null?"PAPER_PNL_QUARANTINED_INSUFFICIENT_VERIFIED_SAMPLE":"SOME_PROSPECTIVE_EVIDENCE_INSUFFICIENT_SAMPLE"};
   if(input.eligibleMisses>0&&input.eligibleMissNet>0)return{capitalPermission:"SHADOW",verdict:"EXPAND_TEST",reason:"POSITIVE_MISSED_ELIGIBLE_EVIDENCE_NO_REALIZED_SAMPLE"};
   return{capitalPermission:"SHADOW",verdict:"SHADOW_ONLY",reason:"INSUFFICIENT_TRANSFER_EVIDENCE"};
 }
@@ -39,16 +46,17 @@ export async function buildLiveEdgeController(){
     const blockedNets=blocked.map((x:AnyObj)=>n(x?.sourceRoundTrip?.estimatedFollowerNetSol)).filter((x:number)=>x!==0);
     const dailyCapBlocked=blocked.filter((x:AnyObj)=>String(x?.executionEvidence?.reason||"").includes("DAILY_CAP"));
     const tokenCapBlocked=blocked.filter((x:AnyObj)=>/TOKEN_(DAY|WEEK)_CAP/.test(String(x?.executionEvidence?.reason||"")));
-    const closed=n(pw?.closedPositions),realized=n(pw?.realizedNetSol),paperBuys=n(pw?.paperBuys);
-    const v=verdict({closed,realized,paperBuys,matched:matched.length,eligibleMisses:eligibleMisses.length,eligibleMissNet:sum(eligibleMissNets)});
+    const closed=n(pw?.closedPositions),paperBuys=n(pw?.paperBuys);
     const p=walletPolicy(address);
+    const paperPnl=paperPnlGuard(Number(pw?.realizedNetSol),paperBuys,n(p?.tradeSizeSol));
+    const v=verdict({closed,realized:paperPnl.realizedNetSol,paperBuys,matched:matched.length,eligibleMisses:eligibleMisses.length,eligibleMissNet:sum(eligibleMissNets)});
     return{
       address,
       capitalPermission:v.capitalPermission,
       verdict:v.verdict,
       verdictReason:v.reason,
       currentPolicy:p,
-      prospective:{paperBuys,closedPositions:closed,openPositions:n(pw?.openPositions),realizedNetSol:realized,winRate:pw?.winRate??null},
+      prospective:{paperBuys,closedPositions:closed,openPositions:n(pw?.openPositions),realizedNetSol:paperPnl.realizedNetSol,rawRealizedNetSol:paperPnl.rawRealizedNetSol,pnlQuarantined:paperPnl.quarantined,pnlQuarantineReason:paperPnl.reason,pnlQuarantineLimitSol:paperPnl.limitSol,winRate:paperPnl.quarantined?null:(pw?.winRate??null)},
       transferTruth:{opportunities:rows.length,followerBuysMatched:matched.length,policyBlocked:blocked.length,eligibleNotCopied:eligibleMisses.length,eligibleMissEstimatedNetSol:sum(eligibleMissNets),eligibleMissAverageNetSol:mean(eligibleMissNets),dailyCapBlocked:dailyCapBlocked.length,tokenCapBlocked:tokenCapBlocked.length,policyBlockedKnownNetSol:sum(blockedNets)},
       counterfactual:{
         currentDailyCap:p.dailyCap,
@@ -57,8 +65,8 @@ export async function buildLiveEdgeController(){
       }
     };
   });
-  const summary={production:scorecards.filter((x:Scorecard)=>x.capitalPermission==="PRODUCTION").length,probation:scorecards.filter((x:Scorecard)=>x.capitalPermission==="PROBATION").length,shadow:scorecards.filter((x:Scorecard)=>x.capitalPermission==="SHADOW").length,paused:scorecards.filter((x:Scorecard)=>x.capitalPermission==="PAUSE").length};
-  const out={schemaVersion:1,event:"shark_scout_live_edge_controller_complete",generatedAt,principle:"actual follower and prospective evidence veto historical replay quality",liveMirrorCount:liveMirrors.length,summary,scorecards,guardrails:{mutatesOdin:false,changesCapital:false,changesTips:false,changesSpeed:false,changesFilters:false,changesCaps:false},notes:["Capital permission is advisory only and never mutates Odin.","Policy-blocked misses are separated from execution/transfer misses.","Only DAILY_CAP blocks are admitted into daily-cap expansion evidence; TOKEN_DAY_CAP and TOKEN_WEEK_CAP are not treated as third-slot evidence.","Historical replay is intentionally absent from the promotion rule; prospective follower/paper evidence has veto power."]};
+  const summary={production:scorecards.filter((x:Scorecard)=>x.capitalPermission==="PRODUCTION").length,probation:scorecards.filter((x:Scorecard)=>x.capitalPermission==="PROBATION").length,shadow:scorecards.filter((x:Scorecard)=>x.capitalPermission==="SHADOW").length,paused:scorecards.filter((x:Scorecard)=>x.capitalPermission==="PAUSE").length,paperPnlQuarantined:scorecards.filter((x:Scorecard)=>x?.prospective?.pnlQuarantined===true).length};
+  const out={schemaVersion:2,event:"shark_scout_live_edge_controller_complete",generatedAt,principle:"actual follower and prospective evidence veto historical replay quality",liveMirrorCount:liveMirrors.length,summary,scorecards,guardrails:{mutatesOdin:false,changesCapital:false,changesTips:false,changesSpeed:false,changesFilters:false,changesCaps:false},notes:["Capital permission is advisory only and never mutates Odin.","Extreme Paper-Odin aggregate PnL is preserved as rawRealizedNetSol but quarantined from verdicts until independently verified.","Policy-blocked misses are separated from execution/transfer misses.","Only DAILY_CAP blocks are admitted into daily-cap expansion evidence; TOKEN_DAY_CAP and TOKEN_WEEK_CAP are not treated as third-slot evidence.","Historical replay is intentionally absent from the promotion rule; prospective follower/paper evidence has veto power."]};
   await atomic(OUT_PATH,out);console.log(JSON.stringify(out));return out;
 }
 
