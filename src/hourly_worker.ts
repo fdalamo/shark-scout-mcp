@@ -1,8 +1,9 @@
 import { ChildProcess, spawn } from "node:child_process";
 
-const PATCH = "0.53.1-mission-reset";
+const PATCH = "0.54.0-discovery-throughput";
 const RUNNER = "dist/cron_supervisor.js";
 const POST_PROCESSORS = [
+  ["mission_discovery", "dist/mission_discovery_runner.js"],
   ["odin_actual_reconciler", "dist/odin_actual_reconciler.js"],
   ["replacement_ladder", "dist/replacement_ladder.js"],
   ["mission_report", "dist/mission_report.js"]
@@ -87,7 +88,8 @@ async function runOnce(trigger: "scheduled" | "startup_recovery") {
     runtimeMs: Date.now()-startedAt,
     runnerResult,
     postResults,
-    missionReset:true
+    missionReset:true,
+    package2:true
   });
 }
 
