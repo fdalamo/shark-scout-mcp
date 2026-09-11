@@ -1,6 +1,6 @@
 import { ChildProcess, spawn } from "node:child_process";
 
-const PATCH = "0.54.1-discovery-dedupe";
+const PATCH = "0.55.0-package3";
 const RUNNER = "dist/cron_supervisor.js";
 const POST_PROCESSORS = [
   ["mission_discovery", "dist/mission_discovery_runner.js"],
@@ -35,7 +35,7 @@ function nextHourDelayMs(now = new Date()) {
   return Math.max(1_000, next.getTime() - now.getTime());
 }
 
-async function runChild(label:string, script:string){
+async function runChild(label:string,script:string){
   if(shuttingDown)return {label,status:"SKIPPED_SHUTDOWN",exitCode:null as number|null,runtimeMs:0};
   const startedAt=Date.now();
   emit("shark_scout_hourly_worker_stage_started",{label,script});
@@ -89,7 +89,8 @@ async function runOnce(trigger: "scheduled" | "startup_recovery") {
     runnerResult,
     postResults,
     missionReset:true,
-    package2:true
+    package2:true,
+    package3:true
   });
 }
 
