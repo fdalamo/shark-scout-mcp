@@ -2,6 +2,10 @@ import { ChildProcess, spawn } from "node:child_process";
 
 const PATCH = "0.55.0-package3";
 const RUNNER = "dist/cron_supervisor.js";
+const CORE_OVERRIDES = {
+  GAUNTLET_PREFILTER_LIMIT: "30",
+  GAUNTLET_FULL_LIMIT: "10"
+};
 const POST_PROCESSORS = [
   ["mission_discovery", "dist/mission_discovery_runner.js"],
   ["odin_actual_reconciler", "dist/odin_actual_reconciler.js"],
@@ -38,8 +42,9 @@ function nextHourDelayMs(now = new Date()) {
 async function runChild(label:string,script:string){
   if(shuttingDown)return {label,status:"SKIPPED_SHUTDOWN",exitCode:null as number|null,runtimeMs:0};
   const startedAt=Date.now();
-  emit("shark_scout_hourly_worker_stage_started",{label,script});
-  const child=spawn(process.execPath,[script],{stdio:"inherit",env:process.env});
+  const childEnv=label==="shark_scout_runner"?{...process.env,...CORE_OVERRIDES}:process.env;
+  emit("shark_scout_hourly_worker_stage_started",{label,script,envOverrides:label==="shark_scout_runner"?CORE_OVERRIDES:null});
+  const child=spawn(process.execPath,[script],{stdio:"inherit",env:childEnv});
   current=child;
   return await new Promise<{label:string;status:string;exitCode:number|null;runtimeMs:number}>((resolve)=>{
     let settled=false;
@@ -73,7 +78,7 @@ async function runOnce(trigger: "scheduled" | "startup_recovery") {
   }
   lastSlot = slot;
 
-  emit("shark_scout_hourly_worker_run_started", { trigger, slot, runner: RUNNER,postProcessors:POST_PROCESSORS.map(x=>x[0]) });
+  emit("shark_scout_hourly_worker_run_started", { trigger, slot, runner: RUNNER,postProcessors:POST_PROCESSORS.map(x=>x[0]),coreOverrides:CORE_OVERRIDES });
   const startedAt = Date.now();
   const runnerResult=await runChild("shark_scout_runner",RUNNER);
   const postResults=[];
@@ -144,7 +149,8 @@ emit("shark_scout_hourly_worker_started", {
   schedule: "top_of_every_hour_utc_equivalent",
   noOverlap: true,
   runner: RUNNER,
-  postProcessors:POST_PROCESSORS.map(x=>x[0])
+  postProcessors:POST_PROCESSORS.map(x=>x[0]),
+  coreOverrides:CORE_OVERRIDES
 });
 
 scheduleNext();
