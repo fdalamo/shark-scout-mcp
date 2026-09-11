@@ -1,6 +1,6 @@
 import { ChildProcess, spawn } from "node:child_process";
 
-const PATCH = "0.55.1-package3-hotfix";
+const PATCH = "0.55.2-package32-gauntlet-envelope";
 const RUNNER = "dist/cron_supervisor.js";
 const CORE_OVERRIDES = {
   GAUNTLET_PREFILTER_LIMIT: "20",
@@ -100,7 +100,8 @@ async function runOnce(trigger: "scheduled" | "startup_recovery") {
     missionReset:true,
     package2:true,
     package3:true,
-    package31:true
+    package31:true,
+    package32:true
   });
 }
 
