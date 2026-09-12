@@ -36,18 +36,31 @@ function compactStudy(value: any) {
   if (!value || typeof value !== "object") return null;
   const take = (v: any) => Array.isArray(v) ? v.slice(0, 12) : undefined;
   return {
+    event: value.event ?? null,
     generatedAt: value.generatedAt ?? value.finishedAt ?? value.updatedAt ?? null,
+    startedAt: value.startedAt ?? null,
+    finishedAt: value.finishedAt ?? null,
     status: value.status ?? null,
     summary: value.summary ?? value.totals ?? null,
+    targets: take(value.targets),
     byMirror: take(value.byMirror),
     mirrors: take(value.mirrors),
+    wallets: take(value.wallets),
     positions: take(value.positions),
     openPositions: take(value.openPositions),
     holdings: take(value.holdings),
     findings: take(value.findings),
-    opportunities: take(value.opportunities),
+    opportunities: Array.isArray(value.opportunities) ? take(value.opportunities) : value.opportunities ?? null,
+    branches: take(value.branches),
+    levels: take(value.levels),
+    horizonHours: value.horizonHours ?? null,
+    active: value.active ?? null,
+    closed: value.closed ?? null,
+    skippedSignals: value.skippedSignals ?? null,
     rows: take(value.rows),
-    counters: value.counters ?? null
+    counters: value.counters ?? null,
+    errors: take(value.errors),
+    notes: take(value.notes)
   };
 }
 
