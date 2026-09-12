@@ -15,7 +15,13 @@ const PATHS = {
   actualOdin: process.env.SCOUT_ODIN_ACTUAL_RECONCILIATION_PATH || "/data/odin-actual-reconciliation.json",
   candidateEngine: process.env.SCOUT_CANDIDATE_ENGINE_REPORT_PATH || "/data/candidate-engine-report.json",
   replacementLadder: process.env.SCOUT_REPLACEMENT_LADDER_PATH || "/data/replacement-ladder.json",
-  odinSnapshot: process.env.SCOUT_ODIN_SNAPSHOT_PATH || "/data/odin-mirror-snapshot.json"
+  odinSnapshot: process.env.SCOUT_ODIN_SNAPSHOT_PATH || "/data/odin-mirror-snapshot.json",
+  paperOdin: process.env.SCOUT_PAPER_ODIN_REPORT_PATH || "/data/paper-odin-report.json",
+  dipShadow: process.env.SCOUT_DIP_SHADOW_REPORT_PATH || "/data/dip-shadow-report.json",
+  portfolio: process.env.SCOUT_PORTFOLIO_PATH || "/data/portfolio.json",
+  opportunity: process.env.SCOUT_OPPORTUNITY_PATH || "/data/opportunity-audit.json",
+  odinCapAudit: process.env.SCOUT_ODIN_CAP_AUDIT_PATH || "/data/odin-cap-audit.json",
+  liveLedger: process.env.SCOUT_LIVE_LEDGER_PATH || "/data/live-ledger.json"
 } as const;
 
 function readJson(path: string) {
@@ -24,6 +30,25 @@ function readJson(path: string) {
   } catch {
     return null;
   }
+}
+
+function compactStudy(value: any) {
+  if (!value || typeof value !== "object") return null;
+  const take = (v: any) => Array.isArray(v) ? v.slice(0, 12) : undefined;
+  return {
+    generatedAt: value.generatedAt ?? value.finishedAt ?? value.updatedAt ?? null,
+    status: value.status ?? null,
+    summary: value.summary ?? value.totals ?? null,
+    byMirror: take(value.byMirror),
+    mirrors: take(value.mirrors),
+    positions: take(value.positions),
+    openPositions: take(value.openPositions),
+    holdings: take(value.holdings),
+    findings: take(value.findings),
+    opportunities: take(value.opportunities),
+    rows: take(value.rows),
+    counters: value.counters ?? null
+  };
 }
 
 function snapshot() {
@@ -38,8 +63,28 @@ function snapshot() {
     actualOdin: readJson(PATHS.actualOdin),
     candidateEngine: readJson(PATHS.candidateEngine),
     replacementLadder: readJson(PATHS.replacementLadder),
-    odinSnapshot: readJson(PATHS.odinSnapshot)
+    odinSnapshot: readJson(PATHS.odinSnapshot),
+    paperOdin: readJson(PATHS.paperOdin),
+    dipShadow: readJson(PATHS.dipShadow),
+    portfolio: readJson(PATHS.portfolio),
+    opportunity: readJson(PATHS.opportunity),
+    odinCapAudit: readJson(PATHS.odinCapAudit),
+    liveLedger: readJson(PATHS.liveLedger)
   };
+}
+
+function emitStudyAuditSnapshot(reason: "startup") {
+  console.log(JSON.stringify({
+    event: "shark_scout_study_audit_snapshot",
+    at: new Date().toISOString(),
+    reason,
+    paperOdin: compactStudy(readJson(PATHS.paperOdin)),
+    dipShadow: compactStudy(readJson(PATHS.dipShadow)),
+    portfolio: compactStudy(readJson(PATHS.portfolio)),
+    opportunity: compactStudy(readJson(PATHS.opportunity)),
+    odinCapAudit: compactStudy(readJson(PATHS.odinCapAudit)),
+    liveLedger: compactStudy(readJson(PATHS.liveLedger))
+  }));
 }
 
 const server = createServer((req, res) => {
@@ -70,6 +115,7 @@ const server = createServer((req, res) => {
 
 server.listen(PORT, HOST, () => {
   console.log(JSON.stringify({ event: "shark_scout_audit_server_started", at: new Date().toISOString(), port: PORT, auditAuth: "bearer" }));
+  emitStudyAuditSnapshot("startup");
 });
 
 void import("./hourly_worker.js");
