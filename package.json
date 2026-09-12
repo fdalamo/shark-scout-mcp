@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/browser.ts",
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node dist/candidate_engine_selftest.js",
     "test:replay": "node dist/replay_core_selftest.js",
     "test:fragility": "node dist/odin_fragility_selftest.js",
     "test:candidate-engine": "node dist/candidate_engine_selftest.js",
