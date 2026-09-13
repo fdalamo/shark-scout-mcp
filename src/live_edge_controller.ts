@@ -7,6 +7,7 @@ type Scorecard=AnyObj;
 const ODIN_PATH=process.env.SCOUT_ODIN_SNAPSHOT_PATH||"/data/odin-config.json";
 const TRUTH_PATH=process.env.SCOUT_ODIN_TRUTH_LEDGER_PATH||"/data/odin-truth-ledger.json";
 const PAPER_REPORT_PATH=process.env.SCOUT_PAPER_ODIN_REPORT_PATH||"/data/paper-odin-report.json";
+const ACTUAL_PATH=process.env.SCOUT_ODIN_ACTUAL_RECONCILIATION_PATH||"/data/odin-actual-reconciliation.json";
 const OUT_PATH=process.env.SCOUT_LIVE_EDGE_PATH||"/data/live-edge-controller.json";
 const MAX_PAPER_RETURN_MULTIPLE=Math.max(1000,Number(process.env.SCOUT_LIVE_EDGE_MAX_PAPER_RETURN_MULTIPLE||10000));
 
@@ -31,7 +32,7 @@ function verdict(input:{closed:number;realized:number|null;paperBuys:number;matc
 
 export async function buildLiveEdgeController(){
   const generatedAt=new Date().toISOString();
-  const [odin,truth,paper]=await Promise.all([read(ODIN_PATH,{}),read(TRUTH_PATH,{entries:{}}),read(PAPER_REPORT_PATH,{wallets:[]})]);
+  const [odin,truth,paper,actual]=await Promise.all([read(ODIN_PATH,{}),read(TRUTH_PATH,{entries:{}}),read(PAPER_REPORT_PATH,{wallets:[]}),read(ACTUAL_PATH,{byMirror:[],summary:{}})]);
   const trackedMirrors:AnyObj[]=(Array.isArray(odin?.mirrors)?odin.mirrors:[])
     .map((x:any)=>({address:String(x?.address||x?.wallet||x?.sourceWallet||""),allowBuys:x?.allowBuys}))
     .filter((x:AnyObj)=>Boolean(x.address));
@@ -40,9 +41,12 @@ export async function buildLiveEdgeController(){
   const truthEntries=Object.values(truth?.entries||{}) as AnyObj[];
   const paperPairs:[string,AnyObj][]=(Array.isArray(paper?.wallets)?paper.wallets:[]).map((x:any)=>[String(x?.address||x?.wallet||""),x] as [string,AnyObj]);
   const paperWallets=new Map<string,AnyObj>(paperPairs);
+  const actualPairs:[string,AnyObj][]=(Array.isArray(actual?.byMirror)?actual.byMirror:[]).map((x:any)=>[String(x?.mirror||x?.address||""),x] as [string,AnyObj]);
+  const actualByMirror=new Map<string,AnyObj>(actualPairs);
   const scorecards:Scorecard[]=liveMirrors.map((address:string)=>{
     const rows=truthEntries.filter((x:AnyObj)=>String(x?.mirror||"")===address);
     const pw=paperWallets.get(address)||{};
+    const aw=actualByMirror.get(address)||{};
     const matched=rows.filter((x:AnyObj)=>x?.state==="FOLLOWER_BUY_MATCHED");
     const blocked=rows.filter((x:AnyObj)=>x?.state==="COPY_BLOCKED_BY_ODIN_POLICY");
     const eligibleMisses=rows.filter((x:AnyObj)=>x?.state==="EXPECTED_COPY_NOT_MATCHED");
@@ -51,15 +55,18 @@ export async function buildLiveEdgeController(){
     const dailyCapBlocked=blocked.filter((x:AnyObj)=>String(x?.executionEvidence?.reason||"").includes("DAILY_CAP"));
     const tokenCapBlocked=blocked.filter((x:AnyObj)=>/TOKEN_(DAY|WEEK)_CAP/.test(String(x?.executionEvidence?.reason||"")));
     const closed=n(pw?.closedPositions),paperBuys=n(pw?.paperBuys);
+    const actualClosed=n(aw?.closed),actualWins=n(aw?.wins),actualLosses=n(aw?.losses),actualNetSol=n(aw?.netSol);
     const p=walletPolicy(address);
     const paperPnl=paperPnlGuard(Number(pw?.realizedNetSol),paperBuys,n(p?.tradeSizeSol));
-    const v=verdict({closed,realized:paperPnl.realizedNetSol,paperBuys,matched:matched.length,eligibleMisses:eligibleMisses.length,eligibleMissNet:sum(eligibleMissNets)});
+    let v=verdict({closed,realized:paperPnl.realizedNetSol,paperBuys,matched:matched.length,eligibleMisses:eligibleMisses.length,eligibleMissNet:sum(eligibleMissNets)});
+    if(actualClosed>=3&&actualNetSol<0)v={capitalPermission:"PAUSE",verdict:"PAUSE",reason:"NEGATIVE_ACTUAL_FOLLOWER_REALIZED_WITH_SAMPLE"};
     return{
       address,
       capitalPermission:v.capitalPermission,
       verdict:v.verdict,
       verdictReason:v.reason,
       currentPolicy:p,
+      actualFollower:{closed:actualClosed,wins:actualWins,losses:actualLosses,netSol:actualNetSol,sourceGeneratedAt:actual?.generatedAt||null,governanceSafe:Boolean(actual?.summary?.governanceSafe)},
       prospective:{paperBuys,closedPositions:closed,openPositions:n(pw?.openPositions),realizedNetSol:paperPnl.realizedNetSol,rawRealizedNetSol:paperPnl.rawRealizedNetSol,pnlQuarantined:paperPnl.quarantined,pnlQuarantineReason:paperPnl.reason,pnlQuarantineLimitSol:paperPnl.limitSol,winRate:paperPnl.quarantined?null:(pw?.winRate??null)},
       transferTruth:{opportunities:rows.length,followerBuysMatched:matched.length,policyBlocked:blocked.length,eligibleNotCopied:eligibleMisses.length,eligibleMissEstimatedNetSol:sum(eligibleMissNets),eligibleMissAverageNetSol:mean(eligibleMissNets),dailyCapBlocked:dailyCapBlocked.length,tokenCapBlocked:tokenCapBlocked.length,policyBlockedKnownNetSol:sum(blockedNets)},
       counterfactual:{
@@ -70,7 +77,7 @@ export async function buildLiveEdgeController(){
     };
   });
   const summary={production:scorecards.filter((x:Scorecard)=>x.capitalPermission==="PRODUCTION").length,probation:scorecards.filter((x:Scorecard)=>x.capitalPermission==="PROBATION").length,shadow:scorecards.filter((x:Scorecard)=>x.capitalPermission==="SHADOW").length,paused:scorecards.filter((x:Scorecard)=>x.capitalPermission==="PAUSE").length,paperPnlQuarantined:scorecards.filter((x:Scorecard)=>x?.prospective?.pnlQuarantined===true).length};
-  const out={schemaVersion:3,event:"shark_scout_live_edge_controller_complete",generatedAt,principle:"actual follower and prospective evidence veto historical replay quality",trackedMirrorCount:trackedMirrors.length,liveMirrorCount:liveMirrors.length,buysDisabledMirrorCount:buysDisabledMirrors.length,liveMirrors,buysDisabledMirrors,summary,scorecards,guardrails:{mutatesOdin:false,changesCapital:false,changesTips:false,changesSpeed:false,changesFilters:false,changesCaps:false},notes:["Capital permission is advisory only and never mutates Odin.","Only buy-enabled Odin mirrors are governed as live; buys-disabled tracked records are reported separately and excluded from live scorecards.","Extreme Paper-Odin aggregate PnL is preserved as rawRealizedNetSol but quarantined from verdicts until independently verified.","Policy-blocked misses are separated from execution/transfer misses.","Only DAILY_CAP blocks are admitted into daily-cap expansion evidence; TOKEN_DAY_CAP and TOKEN_WEEK_CAP are not treated as third-slot evidence.","Historical replay is intentionally absent from the promotion rule; prospective follower/paper evidence has veto power."]};
+  const out={schemaVersion:4,event:"shark_scout_live_edge_controller_complete",generatedAt,principle:"actual follower and prospective evidence veto historical replay quality",actualOdinGeneratedAt:actual?.generatedAt||null,trackedMirrorCount:trackedMirrors.length,liveMirrorCount:liveMirrors.length,buysDisabledMirrorCount:buysDisabledMirrors.length,liveMirrors,buysDisabledMirrors,summary,scorecards,guardrails:{mutatesOdin:false,changesCapital:false,changesTips:false,changesSpeed:false,changesFilters:false,changesCaps:false},notes:["Capital permission is advisory only and never mutates Odin.","Attributed ACTUAL_ODIN follower results are a veto surface: >=3 attributed closed follower lots with negative realized net forces PAUSE even when Paper Odin is quarantined or historical replay is strong.","Only buy-enabled Odin mirrors are governed as live; buys-disabled tracked records are reported separately and excluded from live scorecards.","Extreme Paper-Odin aggregate PnL is preserved as rawRealizedNetSol but quarantined from verdicts until independently verified.","Policy-blocked misses are separated from execution/transfer misses.","Only DAILY_CAP blocks are admitted into daily-cap expansion evidence; TOKEN_DAY_CAP and TOKEN_WEEK_CAP are not treated as third-slot evidence.","Historical replay is intentionally absent from the promotion rule; prospective follower/paper evidence has veto power."]};
   await atomic(OUT_PATH,out);console.log(JSON.stringify(out));return out;
 }
 
