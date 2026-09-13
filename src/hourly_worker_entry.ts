@@ -91,6 +91,7 @@ function emitStudyAuditSnapshot(reason: "startup") {
     event: "shark_scout_study_audit_snapshot",
     at: new Date().toISOString(),
     reason,
+    candidateEngine: compactStudy(readJson(PATHS.candidateEngine)),
     paperOdin: compactStudy(readJson(PATHS.paperOdin)),
     dipShadow: compactStudy(readJson(PATHS.dipShadow)),
     portfolio: compactStudy(readJson(PATHS.portfolio)),
