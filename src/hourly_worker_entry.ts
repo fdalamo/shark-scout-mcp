@@ -5,7 +5,8 @@ const PORT = Number(process.env.PORT || 3000);
 const HOST = "0.0.0.0";
 const AUDIT_TOKENS = [
   process.env.SHARK_TELEMETRY_TOKEN || "",
-  process.env.SCOUT_AUDIT_READ_TOKEN || ""
+  process.env.SCOUT_AUDIT_READ_TOKEN || "",
+  process.env.SCOUT_AUTOMATION_AUDIT_TOKEN || ""
 ].filter(Boolean);
 
 const PATHS = {
