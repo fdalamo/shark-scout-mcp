@@ -80,6 +80,22 @@ function compactJson(value: any, depth = 0): any {
   return String(value);
 }
 
+// Railway's log index can drop or truncate the larger durable snapshots. This
+// intentionally emits small, individually searchable records for the artifacts
+// needed to certify an hourly run without changing any research/trading logic.
+function compactCritical(value: any, depth = 0): any {
+  if (value == null || typeof value === "number" || typeof value === "boolean") return value;
+  if (typeof value === "string") return value.length > 240 ? `${value.slice(0, 240)}…` : value;
+  if (depth >= 3) return "[depth-truncated]";
+  if (Array.isArray(value)) return value.slice(0, 6).map((item) => compactCritical(item, depth + 1));
+  if (typeof value === "object") {
+    const out: Record<string, any> = {};
+    for (const [key, item] of Object.entries(value).slice(0, 48)) out[key] = compactCritical(item, depth + 1);
+    return out;
+  }
+  return String(value);
+}
+
 function snapshot() {
   return {
     generatedAt: new Date().toISOString(),
@@ -115,6 +131,33 @@ function emitStudyAuditSnapshot(reason: "startup") {
     odinCapAudit: compactStudy(readJson(PATHS.odinCapAudit)),
     liveLedger: compactStudy(readJson(PATHS.liveLedger))
   }));
+}
+
+function emitCriticalAuditSnapshots(reason: "startup") {
+  const critical = {
+    workerState: readJson(PATHS.workerState),
+    pipelineTruth: readJson(PATHS.pipelineTruth),
+    missionDiscovery: readJson(PATHS.missionDiscovery),
+    quotaShield: readJson(PATHS.quotaShield),
+    actualOdin: readJson(PATHS.actualOdin),
+    candidateEngine: readJson(PATHS.candidateEngine),
+    replacementLadder: readJson(PATHS.replacementLadder),
+    odinSnapshot: readJson(PATHS.odinSnapshot),
+    paperOdin: readJson(PATHS.paperOdin),
+    dipShadow: readJson(PATHS.dipShadow),
+    portfolio: readJson(PATHS.portfolio),
+    opportunity: readJson(PATHS.opportunity),
+    odinCapAudit: readJson(PATHS.odinCapAudit)
+  };
+  for (const [artifact, value] of Object.entries(critical)) {
+    console.log(JSON.stringify({
+      event: "shark_scout_audit_critical",
+      at: new Date().toISOString(),
+      reason,
+      artifact,
+      snapshot: compactCritical(value)
+    }));
+  }
 }
 
 function emitDurableArtifactSnapshots(reason: "startup") {
@@ -161,6 +204,7 @@ const server = createServer((req, res) => {
 
 server.listen(PORT, HOST, () => {
   console.log(JSON.stringify({ event: "shark_scout_audit_server_started", at: new Date().toISOString(), port: PORT, auditAuth: "bearer" }));
+  emitCriticalAuditSnapshots("startup");
   emitStudyAuditSnapshot("startup");
   emitDurableArtifactSnapshots("startup");
 });
