@@ -114,14 +114,18 @@ function emitStudyAuditSnapshot(reason: "startup") {
   }));
 }
 
-function emitDurableAuditSnapshot(reason: "startup") {
+function emitDurableArtifactSnapshots(reason: "startup") {
   const current = snapshot();
-  console.log(JSON.stringify({
-    event: "shark_scout_durable_audit_snapshot",
-    at: new Date().toISOString(),
-    reason,
-    snapshot: compactJson(current)
-  }));
+  for (const [artifact, value] of Object.entries(current)) {
+    if (artifact === "generatedAt") continue;
+    console.log(JSON.stringify({
+      event: "shark_scout_durable_artifact_snapshot",
+      at: new Date().toISOString(),
+      reason,
+      artifact,
+      snapshot: compactJson(value)
+    }));
+  }
 }
 
 const server = createServer((req, res) => {
@@ -153,7 +157,7 @@ const server = createServer((req, res) => {
 server.listen(PORT, HOST, () => {
   console.log(JSON.stringify({ event: "shark_scout_audit_server_started", at: new Date().toISOString(), port: PORT, auditAuth: "bearer" }));
   emitStudyAuditSnapshot("startup");
-  emitDurableAuditSnapshot("startup");
+  emitDurableArtifactSnapshots("startup");
 });
 
 void import("./hourly_worker.js");
