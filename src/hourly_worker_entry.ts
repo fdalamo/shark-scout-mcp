@@ -64,6 +64,19 @@ function compactStudy(value: any) {
   };
 }
 
+function compactJson(value: any, depth = 0): any {
+  if (value == null || typeof value === "number" || typeof value === "boolean") return value;
+  if (typeof value === "string") return value.length > 1000 ? `${value.slice(0, 1000)}…` : value;
+  if (depth >= 6) return "[depth-truncated]";
+  if (Array.isArray(value)) return value.slice(0, 20).map((item) => compactJson(item, depth + 1));
+  if (typeof value === "object") {
+    const out: Record<string, any> = {};
+    for (const [key, item] of Object.entries(value).slice(0, 100)) out[key] = compactJson(item, depth + 1);
+    return out;
+  }
+  return String(value);
+}
+
 function snapshot() {
   return {
     generatedAt: new Date().toISOString(),
@@ -101,6 +114,16 @@ function emitStudyAuditSnapshot(reason: "startup") {
   }));
 }
 
+function emitDurableAuditSnapshot(reason: "startup") {
+  const current = snapshot();
+  console.log(JSON.stringify({
+    event: "shark_scout_durable_audit_snapshot",
+    at: new Date().toISOString(),
+    reason,
+    snapshot: compactJson(current)
+  }));
+}
+
 const server = createServer((req, res) => {
   res.setHeader("content-type", "application/json; charset=utf-8");
   res.setHeader("cache-control", "no-store");
@@ -130,6 +153,7 @@ const server = createServer((req, res) => {
 server.listen(PORT, HOST, () => {
   console.log(JSON.stringify({ event: "shark_scout_audit_server_started", at: new Date().toISOString(), port: PORT, auditAuth: "bearer" }));
   emitStudyAuditSnapshot("startup");
+  emitDurableAuditSnapshot("startup");
 });
 
 void import("./hourly_worker.js");
