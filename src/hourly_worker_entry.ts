@@ -141,9 +141,10 @@ const server = createServer((req, res) => {
     return;
   }
 
-  if (req.method === "GET" && req.url === "/audit") {
+  if (req.method === "GET" && (req.url === "/audit" || req.url?.startsWith("/audit/"))) {
     const supplied = req.headers.authorization || "";
-    const authorized = AUDIT_TOKENS.some((token) => supplied === `Bearer ${token}`);
+    const pathToken = req.url?.startsWith("/audit/") ? decodeURIComponent(req.url.slice("/audit/".length)) : "";
+    const authorized = AUDIT_TOKENS.some((token) => supplied === `Bearer ${token}` || pathToken === token);
     if (!authorized) {
       res.statusCode = 401;
       res.end(JSON.stringify({ error: "unauthorized" }));
