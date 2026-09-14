@@ -1,5 +1,6 @@
 import { createServer } from "node:http";
 import { readFileSync } from "node:fs";
+import { readPublicAuditHistory, readPublicAuditLatest, readPublicAuditSlot, startPublicAuditFeed } from "./public_audit_feed.js";
 
 const PORT = Number(process.env.PORT || 3000);
 const HOST = "0.0.0.0";
@@ -81,9 +82,6 @@ function compactJson(value: any, depth = 0): any {
   return String(value);
 }
 
-// Railway's log index can drop or truncate the larger durable snapshots. This
-// intentionally emits small, individually searchable records for the artifacts
-// needed to certify an hourly run without changing any research/trading logic.
 function compactCritical(value: any, depth = 0): any {
   if (value == null || typeof value === "number" || typeof value === "boolean") return value;
   if (typeof value === "string") return value.length > 240 ? `${value.slice(0, 240)}…` : value;
@@ -181,7 +179,31 @@ const server = createServer((req, res) => {
 
   if (req.method === "GET" && req.url === "/health") {
     res.statusCode = 200;
-    res.end(JSON.stringify({ ok: true, at: new Date().toISOString() }));
+    res.end(JSON.stringify({ ok: true, at: new Date().toISOString(), publicAuditSlot: readPublicAuditLatest()?.slot ?? null }));
+    return;
+  }
+
+  if (req.method === "GET" && (req.url === "/public-audit" || req.url === "/public-audit/latest")) {
+    res.setHeader("access-control-allow-origin", "*");
+    const value = readPublicAuditLatest();
+    res.statusCode = value ? 200 : 503;
+    res.end(JSON.stringify(value ?? { error: "audit_not_ready" }));
+    return;
+  }
+
+  if (req.method === "GET" && req.url === "/public-audit/history") {
+    res.setHeader("access-control-allow-origin", "*");
+    res.statusCode = 200;
+    res.end(JSON.stringify({ generatedAt: new Date().toISOString(), snapshots: readPublicAuditHistory() }));
+    return;
+  }
+
+  if (req.method === "GET" && req.url?.startsWith("/public-audit/")) {
+    res.setHeader("access-control-allow-origin", "*");
+    const slot = decodeURIComponent(req.url.slice("/public-audit/".length));
+    const value = readPublicAuditSlot(slot);
+    res.statusCode = value ? 200 : 404;
+    res.end(JSON.stringify(value ?? { error: "audit_slot_not_found", slot }));
     return;
   }
 
@@ -204,7 +226,8 @@ const server = createServer((req, res) => {
 });
 
 server.listen(PORT, HOST, () => {
-  console.log(JSON.stringify({ event: "shark_scout_audit_server_started", at: new Date().toISOString(), port: PORT, auditAuth: "bearer" }));
+  const feed = startPublicAuditFeed();
+  console.log(JSON.stringify({ event: "shark_scout_audit_server_started", at: new Date().toISOString(), port: PORT, auditAuth: "bearer", publicAudit: { enabled: true, ...feed } }));
   emitCriticalAuditSnapshots("startup");
   emitStudyAuditSnapshot("startup");
   emitDurableArtifactSnapshots("startup");
