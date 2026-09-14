@@ -3,7 +3,10 @@ import { readFileSync } from "node:fs";
 
 const PORT = Number(process.env.PORT || 3000);
 const HOST = "0.0.0.0";
-const AUDIT_TOKEN = process.env.SHARK_TELEMETRY_TOKEN || "";
+const AUDIT_TOKENS = [
+  process.env.SHARK_TELEMETRY_TOKEN || "",
+  process.env.SCOUT_AUDIT_READ_TOKEN || ""
+].filter(Boolean);
 
 const PATHS = {
   workerState: process.env.SCOUT_HOURLY_WORKER_STATE_PATH || "/data/hourly_worker_state.json",
@@ -140,7 +143,8 @@ const server = createServer((req, res) => {
 
   if (req.method === "GET" && req.url === "/audit") {
     const supplied = req.headers.authorization || "";
-    if (!AUDIT_TOKEN || supplied !== `Bearer ${AUDIT_TOKEN}`) {
+    const authorized = AUDIT_TOKENS.some((token) => supplied === `Bearer ${token}`);
+    if (!authorized) {
       res.statusCode = 401;
       res.end(JSON.stringify({ error: "unauthorized" }));
       return;
