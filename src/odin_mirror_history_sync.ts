@@ -1,0 +1,16 @@
+import { promises as fs } from "node:fs";
+import path from "node:path";
+
+const KEY=process.env.ODIN_API_KEY?.trim();
+const BASE=process.env.ODIN_API_BASE?.trim()||"https://api.odinbot.io";
+const SNAP=process.env.SCOUT_ODIN_SNAPSHOT_PATH||"/data/odin-config.json";
+const OUT=process.env.SCOUT_ODIN_MIRROR_HISTORY_PATH||"/data/odin-mirror-history.json";
+const TIMEOUT=Math.max(3000,Math.min(30000,Number(process.env.REQUEST_TIMEOUT_MS||15000)));
+
+async function read(p:string,d:any){try{return JSON.parse(await fs.readFile(p,"utf8"));}catch{return d;}}
+async function save(p:string,v:any){await fs.mkdir(path.dirname(p),{recursive:true});const t=`${p}.${process.pid}.tmp`;await fs.writeFile(t,JSON.stringify(v));await fs.rename(t,p);}
+async function probe(endpoint:string){const c=new AbortController(),t=setTimeout(()=>c.abort(),TIMEOUT);try{const r=await fetch(BASE+endpoint,{headers:{"x-api-key":KEY||"",accept:"application/json"},signal:c.signal});const text=await r.text();let body:any=null;try{body=text?JSON.parse(text):null;}catch{}return{endpoint,status:r.status,ok:r.ok,body};}finally{clearTimeout(t);}}
+function rowsFrom(body:any,mirror:string){const arrays=[body?.rows,body?.trades,body?.history,body?.tokens,body?.data,Array.isArray(body)?body:null].filter(Array.isArray) as any[][];const a=arrays[0]||[];return a.map((x:any)=>({mirror, mint:String(x?.mint||x?.tokenMint||x?.token?.mint||x?.address||""),symbol:String(x?.symbol||x?.tokenSymbol||x?.token?.symbol||""),realizedPnlSol:Number(x?.realizedPnlSol??x?.realizedPnl??x?.pnlSol??x?.pnl??NaN),realizedPct:Number(x?.realizedPct??x?.pnlPct??x?.roi??NaN),lastTradeAt:x?.lastTradeAt||x?.updatedAt||x?.closedAt||null})).filter((x:any)=>(x.mint||x.symbol)&&Number.isFinite(x.realizedPnlSol));}
+export async function runOdinMirrorHistorySync(){if(!KEY){console.log(JSON.stringify({event:"shark_scout_odin_mirror_history_skipped",reason:"ODIN_API_KEY_missing"}));return;}const snap=await read(SNAP,{mirrors:[]});const mirrors=(snap.mirrors||[]).map((x:any)=>String(x.address||"")).filter(Boolean);const old=await read(OUT,{rows:[]});const all:any[]=[];const diagnostics:any[]=[];for(const m of mirrors){const candidates=[`/v1/mirror/${m}/trades`,`/v1/mirror/${m}/history`,`/v1/mirror/${m}/tokens`,`/v1/trades?mirror=${m}`];let found=false;for(const ep of candidates){try{const q=await probe(ep);const rows=q.ok?rowsFrom(q.body,m):[];diagnostics.push({mirror:m,endpoint:ep,status:q.status,rowCount:rows.length});if(rows.length){all.push(...rows);found=true;break;}if(q.status===429)break;}catch(e){diagnostics.push({mirror:m,endpoint:ep,status:"ERROR",rowCount:0});}}if(!found){}}
+const dedupe=new Map<string,any>();for(const r of [...(old.rows||[]),...all])dedupe.set(`${r.mirror}|${r.mint||r.symbol}`,r);const out={schemaVersion:1,fetchedAt:new Date().toISOString(),rows:[...dedupe.values()],diagnostics};await save(OUT,out);console.log(JSON.stringify({event:"shark_scout_odin_mirror_history_sync_complete",mirrors:mirrors.length,newRows:all.length,totalRows:out.rows.length,probes:diagnostics.map(x=>({status:x.status,rowCount:x.rowCount}))}));}
+if(import.meta.url===`file://${process.argv[1]}`)runOdinMirrorHistorySync().catch(e=>console.log(JSON.stringify({event:"shark_scout_odin_mirror_history_sync_failed",error:e instanceof Error?e.message:String(e)})));
