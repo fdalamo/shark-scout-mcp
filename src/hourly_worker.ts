@@ -1,7 +1,7 @@
 import { ChildProcess, spawn } from "node:child_process";
 import { readFileSync, renameSync, writeFileSync } from "node:fs";
 
-const PATCH = "0.56.5-package44-odin-attribution";
+const PATCH = "0.56.6-package44-odin-history-sync";
 const RUNNER = "dist/cron_supervisor.js";
 const WORKER_STATE_PATH = process.env.SCOUT_HOURLY_WORKER_STATE_PATH || "/data/hourly_worker_state.json";
 const WATCHDOG_INTERVAL_MS = 5 * 60 * 1000;
@@ -23,6 +23,7 @@ const CORE_OVERRIDES = {
 };
 const POST_PROCESSORS = [
   ["mission_discovery", "dist/mission_discovery_runner.js"],
+  ["odin_mirror_history_sync", "dist/odin_mirror_history_sync.js"],
   ["odin_actual_reconciler", "dist/odin_actual_reconciler.js"],
   ["decision_evidence_engine", "dist/decision_evidence_engine.js"],
   ["candidate_engine", "dist/candidate_engine.js"],
