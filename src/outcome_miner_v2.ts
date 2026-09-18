@@ -6,7 +6,7 @@ import { discoverDexScreenerSeeds, type DexSeed } from "./dexscreener_seed.js";
 const STATE_PATH=process.env.SCOUT_STATE_PATH||"./data/shark-state.json";
 const OUT_PATH=process.env.SCOUT_OUTCOME_MINER_PATH||"./data/outcome-miner-v2.json";
 const POLL_HOURS=clamp(Number(process.env.OUTCOME_MINER_POLL_HOURS||6),2,24);
-const MAX_POOLS=clamp(Number(process.env.OUTCOME_MINER_MAX_POOLS||18),6,30);
+const MAX_POOLS=clamp(Number(process.env.OUTCOME_MINER_MAX_POOLS||18),4,30);
 const ANCHOR_POOLS=clamp(Number(process.env.OUTCOME_MINER_ANCHOR_POOLS||6),2,12);
 const MIN_TRADE_USD=Math.max(25,Number(process.env.OUTCOME_MINER_MIN_TRADE_USD||100));
 const BASE_INTERVAL_MS=clamp(Number(process.env.GECKOTERMINAL_MIN_INTERVAL_MS||9000),7000,30000);
