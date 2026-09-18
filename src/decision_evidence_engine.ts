@@ -10,7 +10,8 @@ const OUT_PATH=process.env.SCOUT_DECISION_EVIDENCE_ENGINE_PATH||"/data/decision-
 const MAX_QUEUE=Math.max(6,Math.min(30,Number(process.env.DECISION_EVIDENCE_MAX_QUEUE||16)));
 
 type AnyObj=Record<string,any>;
-type QueueRow=Omit<ProgressiveCandidate,"canonicalTrades">&{\n  canonicalTrades:number;
+type QueueRow=Omit<ProgressiveCandidate,"canonicalTrades">&{
+  canonicalTrades:number;
   score:number;
   contexts:number;
   source:string[];
