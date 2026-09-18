@@ -10,7 +10,7 @@ const OUT_PATH=process.env.SCOUT_DECISION_EVIDENCE_ENGINE_PATH||"/data/decision-
 const MAX_QUEUE=Math.max(6,Math.min(30,Number(process.env.DECISION_EVIDENCE_MAX_QUEUE||16)));
 
 type AnyObj=Record<string,any>;
-type QueueRow=ProgressiveCandidate&{
+type QueueRow=Omit<ProgressiveCandidate,"canonicalTrades">&{\n  canonicalTrades:number;
   score:number;
   contexts:number;
   source:string[];
@@ -72,7 +72,7 @@ export async function runDecisionEvidenceEngine(){
   for(const key of ["topActionable","topNearPasses","topReplayBlocks","topSampleQualityBlocks"]){
     for(const x of Array.isArray(funnel?.[key])?funnel[key]:[])pushUnique(queue,x,`funnel_${key}`);
   }
-  const live=new Set((Array.isArray(odin?.mirrors)?odin.mirrors:[]).filter((x:any)=>x?.allowBuys!==false).map((x:any)=>String(x?.address||"")).filter(Boolean));
+  const live=new Set<string>((Array.isArray(odin?.mirrors)?odin.mirrors:[]).filter((x:any)=>x?.allowBuys!==false).map((x:any)=>String(x?.address||"")).filter(Boolean));
   for(const address of live){const row=queue.get(address);if(row){row.priorityTier=5;row.decisionValue+=2000;if(!row.reasons.includes("live_incumbent"))row.reasons.push("live_incumbent");}}
   const ranked=[...queue.values()]
     .filter(x=>x.deficit>0)
