@@ -69,14 +69,20 @@ export async function runDecisionEvidenceEngine(){
   const queue=new Map<string,QueueRow>();
   for(const x of Array.isArray(candidate?.shadowActive)?candidate.shadowActive:[])pushUnique(queue,x,"candidate_shadow",4);
   for(const x of Array.isArray(candidate?.reconstructionPriority)?candidate.reconstructionPriority:[])pushUnique(queue,x,"candidate_reconstruction",3);
-  for(const x of Array.isArray(ladder?.historicalLeaders)?ladder.historicalLeaders:[])pushUnique(queue,x,"historical_leader",3);
+  for(const x of Array.isArray(ladder?.historicalLeaders)?ladder.historicalLeaders:[]){
+    const stage=String(x?.candidateStage||x?.stage||"");
+    if(stage==="SHADOW_FAIL"||stage==="SHADOW_PARK")continue;
+    pushUnique(queue,x,"historical_leader",3);
+  }
   for(const key of ["topActionable","topNearPasses","topReplayBlocks","topSampleQualityBlocks"]){
     for(const x of Array.isArray(funnel?.[key])?funnel[key]:[])pushUnique(queue,x,`funnel_${key}`);
   }
   const live=new Set<string>((Array.isArray(odin?.mirrors)?odin.mirrors:[]).filter((x:any)=>x?.allowBuys!==false).map((x:any)=>String(x?.address||"")).filter(Boolean));
   for(const address of live){const row=queue.get(address);if(row){row.priorityTier=5;row.decisionValue+=2000;if(!row.reasons.includes("live_incumbent"))row.reasons.push("live_incumbent");}}
+  const candidateStageByAddress=new Map((Array.isArray(candidate?.candidates)?candidate.candidates:[]).map((x:any)=>[String(x?.address||""),String(x?.stage||"")]));
   const ranked=[...queue.values()]
     .filter(x=>x.deficit>0)
+    .filter(x=>{const stage=candidateStageByAddress.get(x.address);return stage!=="SHADOW_FAIL"&&stage!=="SHADOW_PARK";})
     .sort((a,b)=>b.priorityTier-a.priorityTier||b.decisionValue-a.decisionValue||a.deficit-b.deficit)
     .slice(0,MAX_QUEUE);
   const progressive=await hydrateProgressiveEvidence(ranked.map(({address,priorityTier,deficit,closed,canonicalTrades})=>({address,priorityTier,deficit,closed,canonicalTrades})));
